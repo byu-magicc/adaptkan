@@ -1,0 +1,4 @@
+postprocessor:
+  name: kan
+  postprocessor_args:
+    grid_size: 5

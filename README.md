@@ -1,9 +1,10 @@
 # AdaptKAN
+
+![Demo](assets/digits.gif)
+
 Code respository for "Automatic Grid Updates for Komolgorov Arnold Networks using Layer Histograms."
 
 AdaptKAN provides implementations of Kolmogorov-Arnold Networks (KANs) with support for adaptable continual learning, available in JAX.
-
-![Demo](assets/digits.gif)
 
 ## Features
 
@@ -67,18 +68,19 @@ model, state = eqx.nn.make_with_state(AdaptKANJax)(width=[2, 5, 1])
 
 ```
 .
-├── adaptkan/           # Source code
-│   ├── common/         # Data processing utilities
-│   ├── data/           # Dataset CSVs/raw files
-│   └── jax/            # JAX implementation code
-├── assets/             # Assets used for the github repo
-├── scripts/            # Standalone training scripts
-├── examples/           # Jupyter notebooks
-├── results/            # Generated outputs
-├── helloadaptkan.ipynb # Jupyter notebook with minimal working example
-├── pyproject.toml      # Project setup config
-├── README.md           # This file
-└── LICENSE             # GPL-3.0 License
+├── adaptkan/               # Source code
+│   ├── common/             # Data processing utilities
+│   ├── data/               # Dataset CSVs/raw files
+│   └── jax/                # JAX implementation code
+├── assets/                 # Assets used for the github repo
+├── configs/                # Various configs copied and modified from https://github.com/Jingkang50/OpenOOD 
+├── scripts/                # Standalone training scripts
+├── examples/               # Jupyter notebooks
+├── results/                # Generated outputs
+├── adaptkan_tutorial.ipynb # Jupyter notebook with minimal working example
+├── pyproject.toml          # Project setup config
+├── README.md               # This file
+└── LICENSE                 # GPL-3.0 License
 ```
 
 ## Contributing

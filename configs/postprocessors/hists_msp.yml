@@ -1,0 +1,16 @@
+postprocessor:
+  name: adaptkan
+  APS_mode: False
+  postprocessor_args:
+    grid_size: 50
+    num_partitions: 1 
+    top_k: -1
+    norm: 1
+    use_msp: True
+    softmax_div: 1.0
+    msp_weight: 0.1
+  postprocessor_sweep:
+    n_trials: 200
+    grid_size: [5, 10, 20, 50, 100, 150, 200, 500]
+    norm: [0, 1]
+    msp_weight: [0.0, 1.0]

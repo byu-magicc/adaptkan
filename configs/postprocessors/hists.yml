@@ -1,0 +1,15 @@
+postprocessor:
+  name: adaptkan
+  APS_mode: False
+  postprocessor_args:
+    grid_size: 200
+    num_partitions: 1
+    top_k: -1
+    norm: 1
+  postprocessor_sweep:
+    n_trials: 200
+    grid_size: [5, 10, 20, 50, 100, 150, 200, 500]
+    num_partitions: [5, 10, 20, 50, 100]
+    top_k: [-1]
+    norm: [0, 1]
+    hist_agg_mode: ['min']
