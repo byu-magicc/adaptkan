@@ -57,7 +57,7 @@ class AdaptKANLayerJax(eqx.Module):
                  activation_strategy='linear', # Either linear, zero, or kan. linear is simplest and works well.
                  base_fun=lambda x: x,
                  save_weight_counts=True,
-                 ema_alpha=1.0, # Change this to be closer to zero to change the EMA to more heavily weight past data
+                 ema_alpha=0.01, # Change this to be closer to zero to change the EMA to more heavily weight past data
                  prune_patience=1, # Set this to be equal to the number of batches per epoch. Affects the how often we shrink the domain
                  rounding_precision_eps=0.0,
                  initialization_range=[-1., 1.],
@@ -65,7 +65,7 @@ class AdaptKANLayerJax(eqx.Module):
                  prune_scale_factor=1.0,
                  k=3, # bspline_order
                  prune_mode="default", # Options are "default", "relative", "default" usually works best
-                 stretch_mode="mean", # Options are "mean", "half_max", "max", "edge" or "relative"
+                 stretch_mode="max", # Options are "mean", "half_max", "max", "edge" or "relative"
                  stretch_threshold=None, # Used alongside the "relative" stretch mode
                  exact_refit=False, # turn this on for slightly more accurate results in some scenarios. However exact_refit=False is faster for larger models
                  key=None):
@@ -159,7 +159,7 @@ class AdaptKANLayerJax(eqx.Module):
         
         return weights
     
-    def get_prune_threshold(self, state):
+    def get_shrink_threshold(self, state):
         # Get the prune (shrink) threshold
         if self.prune_mode == "default": # <-- default mode
             thresh = (1 - self.ema_alpha)**self.prune_patience * self.ema_alpha
@@ -173,7 +173,7 @@ class AdaptKANLayerJax(eqx.Module):
     def adapt(self, state):  
 
         # Prune the model if it is the right time to do so
-        prune_out = shrink_weights_and_counts_jax(self.get_prune_threshold(state),
+        prune_out = shrink_weights_and_counts_jax(self.get_shrink_threshold(state),
                                                 self.weights,
                                                 state.get(self.a),
                                                 state.get(self.b),

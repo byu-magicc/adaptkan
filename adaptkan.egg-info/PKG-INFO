@@ -1,0 +1,203 @@
+Metadata-Version: 2.4
+Name: adaptkan
+Version: 0.1.0
+Summary: Adaptable Kolmogorov-Arnold Networks with support for continual learning in PyTorch and JAX.
+Author-email: Your Name <you@example.com>
+License: GPL-3.0
+Requires-Python: ==3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: Cython==3.1.3
+Requires-Dist: cvxpy
+Requires-Dist: numpy==1.26.0
+Requires-Dist: absl-py==2.3.1
+Requires-Dist: beautifulsoup4==4.13.4
+Requires-Dist: certifi==2025.8.3
+Requires-Dist: charset-normalizer==3.4.3
+Requires-Dist: chex==0.1.86
+Requires-Dist: colorlog==6.9.0
+Requires-Dist: contourpy==1.3.2
+Requires-Dist: cycler==0.12.1
+Requires-Dist: diffdist==0.1
+Requires-Dist: eagerpy==0.30.0
+Requires-Dist: equinox==0.12.1
+Requires-Dist: filelock==3.19.1
+Requires-Dist: fonttools==4.59.1
+Requires-Dist: foolbox==3.3.4
+Requires-Dist: fsspec==2025.7.0
+Requires-Dist: gdown==5.2.0
+Requires-Dist: GitPython==3.1.45
+Requires-Dist: greenlet==3.2.4
+Requires-Dist: hf-xet==1.1.7
+Requires-Dist: huggingface-hub==0.34.4
+Requires-Dist: idna==3.10
+Requires-Dist: imageio==2.37.0
+Requires-Dist: imgaug==0.4.0
+Requires-Dist: jaxlib==0.4.38
+Requires-Dist: jaxtyping==0.3.2
+Requires-Dist: Jinja2==3.1.6
+Requires-Dist: joblib==1.5.1
+Requires-Dist: json5==0.12.1
+Requires-Dist: kiwisolver==1.4.9
+Requires-Dist: lazy_loader==0.4
+Requires-Dist: lightning>=2.4.0
+Requires-Dist: Mako==1.3.10
+Requires-Dist: MarkupSafe==3.0.2
+Requires-Dist: matplotlib==3.10.5
+Requires-Dist: ml_dtypes
+Requires-Dist: mpmath==1.3.0
+Requires-Dist: networkx==3.4.2
+Requires-Dist: opencv-python==4.8.1.78
+Requires-Dist: opt-einsum==3.3.0
+Requires-Dist: optax==0.2.3
+Requires-Dist: optuna==4.5.0
+Requires-Dist: packaging==24.1
+Requires-Dist: pandas==2.3.1
+Requires-Dist: patsy==1.0.1
+Requires-Dist: pillow==11.3.0
+Requires-Dist: platformdirs==4.3.8
+Requires-Dist: pykan==0.2.8
+Requires-Dist: pyparsing==3.2.3
+Requires-Dist: PySocks==1.7.1
+Requires-Dist: python-dateutil==2.9.0.post0
+Requires-Dist: pytz==2025.2
+Requires-Dist: PyYAML==6.0.2
+Requires-Dist: requests==2.32.4
+Requires-Dist: safetensors==0.6.2
+Requires-Dist: scikit-image==0.25.2
+Requires-Dist: scikit-learn==1.3.2
+Requires-Dist: scipy==1.11.4
+Requires-Dist: shapely==2.1.1
+Requires-Dist: six==1.17.0
+Requires-Dist: SQLAlchemy==2.0.43
+Requires-Dist: statsmodels==0.14.5
+Requires-Dist: sympy==1.13.1
+Requires-Dist: threadpoolctl==3.6.0
+Requires-Dist: tifffile==2025.5.10
+Requires-Dist: timm==1.0.19
+Requires-Dist: tomli==2.2.1
+Requires-Dist: toolz==1.0.0
+Requires-Dist: typeguard==4.4.4
+Requires-Dist: typing_extensions==4.14.1
+Requires-Dist: tzdata==2025.2
+Requires-Dist: urllib3==2.5.0
+Requires-Dist: wadler_lindig==0.1.7
+Requires-Dist: seaborn
+Requires-Dist: cvxpylayers
+Requires-Dist: gurobipy
+Requires-Dist: qpax
+Requires-Dist: tensorboard
+Requires-Dist: pykan
+Requires-Dist: jupyter
+Requires-Dist: plotly
+Provides-Extra: cuda
+Requires-Dist: libmr==0.1.9; extra == "cuda"
+Requires-Dist: jax[cuda12_pip]==0.4.38; extra == "cuda"
+Requires-Dist: openood@ git+https://github.com/Jingkang50/OpenOOD.git@a485cbb49d692b5f88e38b5ae2b68331f277b9ea ; extra == "cuda"
+Requires-Dist: triton==3.1.0; extra == "cuda"
+Provides-Extra: cpu
+Requires-Dist: jax[cpu]==0.4.38; extra == "cpu"
+Requires-Dist: faiss-cpu; extra == "cpu"
+Dynamic: license-file
+
+# AdaptKAN
+
+![Demo](assets/digits.gif)
+
+Code respository for "Automatic Grid Updates for Komolgorov Arnold Networks using Layer Histograms."
+
+AdaptKAN provides implementations of Kolmogorov-Arnold Networks (KANs) with support for adaptable continual learning, available in JAX.
+
+## Features
+
+- **Customizable Layers**: Control noise injection, grid refinements, and pruning strategies.
+- **Continual Learning**: Adapt model weights online with minimal overhead.
+- **Data Utilities**: Parsers and dataset builders for the benchmarks in the paper.
+- **Training Scripts**: Convenient scripts for Feynman and Lyapunov tasks.
+- **Examples**: Jupyter notebooks in `examples/` to get started quickly.
+
+## Installation 🚀
+
+The following steps will guide you through setting up the project using **uv**.
+
+### Prerequisites
+* Git
+* [uv](https://github.com/astral-sh/uv) (which we will install into the environment)
+
+---
+### Setup Steps
+
+1.  **Clone the Repository**
+    ```bash
+    git clone git@github.com:your-username/adaptkan.git
+    cd adaptkan
+    ```
+
+2.  **Install `uv`**
+    Install uv to easily setup the environment.
+    ```bash
+    wget -qO- https://astral.sh/uv/install.sh | sh
+    ```
+
+3.  **Sync Dependencies from Lock File**
+    Use `uv` to install the exact versions of all external packages from the lock file. This guarantees a reproducible base environment.
+    ```bash
+    cd adaptkan
+    uv sync --extra cuda # or cpu
+    ```
+4.  **Activate the Environment**
+    This command activates the virtual environment for the project.
+    ```bash
+    source .venv/bin/activate
+    ```
+
+Your environment is now complete and ready to use!
+
+## Quick Start
+
+### JAX
+
+The project uses Equinox and Jax. We keep track of two different things during training, ```model``` which is the AdaptKAN model and ```state``` which stores histogram information. See [stateful API reference](https://docs.kidger.site/equinox/api/nn/stateful/) for more details on how to work with ```state```.
+
+```python
+import equinox as eqx
+from adaptkan.jax.model import AdaptKANJax
+
+model, state = eqx.nn.make_with_state(AdaptKANJax)(width=[2, 5, 1])
+```
+
+## Project Structure
+
+```
+.
+├── adaptkan/               # Source code
+│   ├── common/             # Data processing utilities
+│   ├── data/               # Dataset CSVs/raw files
+│   └── jax/                # JAX implementation code
+├── assets/                 # Assets used for the github repo
+├── configs/                # Various configs copied and modified from https://github.com/Jingkang50/OpenOOD 
+├── scripts/                # Standalone training scripts
+├── examples/               # Jupyter notebooks
+├── results/                # Generated outputs
+├── adaptkan_tutorial.ipynb # Jupyter notebook with minimal working example
+├── pyproject.toml          # Project setup config
+├── README.md               # This file
+└── LICENSE                 # GPL-3.0 License
+```
+
+## Contributing
+
+Contributions are welcome! Please:
+1. Fork the repo.
+2. Create a branch (`git checkout -b feature/my-feature`).
+3. Commit changes (`git commit -m "Add feature"`).
+4. Push (`git push origin feature/my-feature`).
+5. Open a pull request.
+
+## License
+
+This project is under the GPL-3.0 License. See [LICENSE](LICENSE) for details.
+
+## Citation
+
+Please use of this project in your code with: TODO
