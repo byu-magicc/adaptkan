@@ -23,8 +23,6 @@ adaptkan/figures/*
 
 archive/*
 
-*.gif
-
 jax_profiling
 jax_profiling_mlp
 jax_profiling_adaptkan
