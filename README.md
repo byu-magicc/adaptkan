@@ -1,6 +1,6 @@
 # AdaptKAN
 
-![Demo](assets/digits.gif)
+![Demo](assets/digits_cropped.gif)
 
 Code respository for "Automatic Grid Updates for Komolgorov Arnold Networks using Layer Histograms."
 
