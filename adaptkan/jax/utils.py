@@ -561,68 +561,6 @@ def stretch_weights_and_counts_jax(activation_weights, data_counts, ood_counts, 
     
     return updated_weights, updated_counts, updated_ood_counts, updated_a, updated_b, stretch
 
-def _stretch_counts_jax(combined_mask, data_counts, ood_counts, a, b, ood_a, ood_b, k, rounding_eps, exact_stretch):
-    # Determine the new domain boundaries
-    new_a = jnp.where(combined_mask, ood_a, a) # TODO Replace combined_mask with a_mask and b_mask
-    new_b = jnp.where(combined_mask, ood_b, b)
-    degree = data_counts.shape[-1]
-
-    # TODO, need to define this function:
-    new_counts, new_ood_counts = refit_counts_jax(
-        data_counts,
-        ood_counts,
-        a,
-        b,
-        degree=degree, # This stays the same during stretching
-        new_a=new_a,
-        new_b=new_b,
-        k=k,
-        rounding_eps=rounding_eps,
-        exact_refit=exact_stretch
-    )
-        
-    return new_counts, new_ood_counts, new_a, new_b
-
-def stretch_counts_jax(data_counts, ood_counts, a, b, ood_a, ood_b, k, rounding_eps, stretch_mode="max", stretch_threshold=None, exact_stretch=False):
-    
-    # Figure out if we need to stretch the weights or not
-    if stretch_mode == "max":
-        a_mask = data_counts.max(-1) < ood_counts[:, 0] # data_counts[:, 0] < ood_counts[:, 0]
-        b_mask = data_counts.max(-1) < ood_counts[:, -1] # data_counts[:, -1] < ood_counts[:, -1]
-    elif stretch_mode == "half_max":
-        a_mask = data_counts.max(-1)*0.5 < ood_counts[:, 0]
-        b_mask = data_counts.max(-1)*0.5 < ood_counts[:, -1]
-    elif stretch_mode == "mean":
-        a_mask = data_counts.mean(-1) < ood_counts[:, 0]
-        b_mask = data_counts.mean(-1) < ood_counts[:, -1]
-    elif stretch_mode == "edge":
-        a_mask = data_counts[:, 0] < ood_counts[:, 0]
-        b_mask = data_counts[:, -1] < ood_counts[:, -1]
-    elif stretch_mode == "threshold":
-        a_mask = data_counts.max(-1) < stretch_threshold
-        b_mask = data_counts.max(-1) < stretch_threshold
-    elif stretch_mode == "relative":
-        a_mask = data_counts.min(-1) < ood_counts[:, 0]*0.1
-        b_mask = data_counts.min(-1) < ood_counts[:, -1]*0.1
-    elif stretch_mode == "interval":
-        a_mask = jnp.ones_like(data_counts[:, 0], dtype=bool)
-        b_mask = jnp.ones_like(data_counts[:, -1], dtype=bool)
-    
-    combined_mask = a_mask | b_mask
-    stretch = jnp.any(combined_mask)
-    
-    # TODO Replace combined_mask with a_mask, b_mask
-    updated_weights, updated_counts, updated_ood_counts, updated_a, updated_b = jax.lax.cond(
-        stretch,
-        lambda: _stretch_counts_jax(combined_mask, data_counts, ood_counts, a, b, ood_a, ood_b, k, rounding_eps, exact_stretch),
-        lambda: (data_counts, ood_counts, a, b)
-    )
-
-    # if stretch:
-    #     print("Stretching:", stretch, a_mask, b_mask, updated_a, updated_b)
-    
-    return updated_counts, updated_ood_counts, updated_a, updated_b, stretch
-
 def shrink_domain(data_counts, ood_counts, thresh):
     # Compute combined mask for pruning
     # This checks to see if the first bins or last bins for the different counts are below the set threshold
