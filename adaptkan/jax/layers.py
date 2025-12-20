@@ -31,6 +31,7 @@ class AdaptKANLayerJax(eqx.Module):
     stretch_mode: str = eqx.field(static=True)
     stretch_threshold: float
     exact_refit: bool = eqx.field(static=True)
+    basis_type: str = eqx.field(static=True)
 
     # Added in new variables for kan initialization
     base_fun: str = eqx.field(static=True)
@@ -52,7 +53,7 @@ class AdaptKANLayerJax(eqx.Module):
     def __init__(self,
                  in_dim=3,
                  out_dim=2,
-                 num_grid_intervals=10,
+                 num_grid_intervals=10, # Number of grid intervals used for bsplines or degree of chebyshev polynomials
                  activation_noise=.1, # How much noise to add to the activation functions at initialization
                  activation_strategy='linear', # Either linear, zero, or kan. linear is simplest and works well.
                  base_fun=lambda x: x,
@@ -63,11 +64,12 @@ class AdaptKANLayerJax(eqx.Module):
                  initialization_range=[-1., 1.],
                  min_delta=1e-4,
                  prune_scale_factor=1.0,
-                 k=3, # bspline_order
+                 k=3, 
                  prune_mode="default", # Options are "default", "relative", "default" usually works best
                  stretch_mode="max", # Options are "mean", "half_max", "max", "edge" or "relative"
                  stretch_threshold=None, # Used alongside the "relative" stretch mode
                  exact_refit=False, # turn this on for slightly more accurate results in some scenarios. However exact_refit=False is faster for larger models
+                 basis_type="bspline", # Adding in chebyshev basis functions
                  key=None):
         
         if key is None:
@@ -91,13 +93,14 @@ class AdaptKANLayerJax(eqx.Module):
         self.stretch_mode = stretch_mode
         self.stretch_threshold = stretch_threshold
         self.exact_refit = exact_refit
+        self.basis_type = basis_type
         
         default_dtype = jnp.array(0.).dtype
         a = jnp.full((in_dim,), float(initialization_range[0]), dtype=default_dtype)
         b = jnp.full((in_dim,), float(initialization_range[1]), dtype=default_dtype)
 
         # Initialize the weights
-        self.weights = self.initialize_weights(in_dim, out_dim, num_grid_intervals, k, activation_noise, activation_strategy, key, a, b)
+        self.weights = self.initialize_weights(in_dim, out_dim, num_grid_intervals, k, activation_noise, activation_strategy, key, a, b, basis_type)
 
         if activation_strategy == 'kan':
             key, subkey = jax.random.split(key)
@@ -142,21 +145,31 @@ class AdaptKANLayerJax(eqx.Module):
             raise ValueError(f"bspline_order {self.k} is not supported.")
 
 
-    def initialize_weights(self, input_dim, output_dim, num_grid_intervals, k, activation_noise, activation_strategy, key, a, b):
+    def initialize_weights(self, input_dim, output_dim, num_grid_intervals, k, activation_noise, activation_strategy, key, a, b, basis_type):
         # Initialize the weights to fall within the specified interval with the specified activation strategy
-        if activation_strategy == 'linear':
-            linspace = jnp.linspace(-1, 1, num_grid_intervals + k)
-            weights = jnp.tile(linspace, (output_dim, input_dim, 1)) + \
-                jax.random.normal(key, (output_dim, input_dim, num_grid_intervals + k)) * activation_noise
-        elif activation_strategy == 'zero':
-            weights = jax.random.normal(key, (output_dim, input_dim, num_grid_intervals + k)) * activation_noise
-        elif activation_strategy == 'kan':
-            noise = (jax.random.uniform(key, (output_dim, input_dim, num_grid_intervals + 1)) - 1/2) * activation_noise / num_grid_intervals
-            weights = coefs_from_curve_jax(noise, a, b, num_grid_intervals, k=k, n_pts=num_grid_intervals+1)
-        else:
-            # TODO define more activation strategies
-            raise ValueError(f"{activation_strategy} is an invalid activation strategy")
-        
+        if basis_type == "bspline":
+            if activation_strategy == 'linear':
+                linspace = jnp.linspace(-1, 1, num_grid_intervals + k)
+                weights = jnp.tile(linspace, (output_dim, input_dim, 1)) + \
+                    jax.random.normal(key, (output_dim, input_dim, num_grid_intervals + k)) * activation_noise
+            elif activation_strategy == 'zero':
+                weights = jax.random.normal(key, (output_dim, input_dim, num_grid_intervals + k)) * activation_noise
+            elif activation_strategy == 'kan':
+                noise = (jax.random.uniform(key, (output_dim, input_dim, num_grid_intervals + 1)) - 1/2) * activation_noise / num_grid_intervals
+                weights = coefs_from_curve_jax(noise, a, b, num_grid_intervals, k=k, n_pts=num_grid_intervals+1)
+            else:
+                # TODO define more activation strategies
+                raise ValueError(f"{activation_strategy} is an invalid activation strategy")
+        elif basis_type == "chebyshev":
+            # Recommended by Gemini
+            if activation_strategy == "linear":
+                weights = jax.random.normal(key, (output_dim, input_dim, num_grid_intervals + 1)) * 0.01
+                
+                # Set T1 (index 1) to a 'LeCun' scale to preserve signal variance
+                # This makes the KAN behave like a standard linear layer at start
+                std = 1.0 / jnp.sqrt(input_dim)
+                weights = weights.at[:, :, 1].set(jax.random.normal(key, (output_dim, input_dim)) * std)
+
         return weights
     
     def get_shrink_threshold(self, state):
@@ -183,7 +196,8 @@ class AdaptKANLayerJax(eqx.Module):
                                                 k=self.k,
                                                 rounding_eps=self.rounding_precision_eps,
                                                 min_delta=self.min_delta,
-                                                exact_shrink=self.exact_refit)
+                                                exact_shrink=self.exact_refit,
+                                                basis_type=self.basis_type)
     
         updated_weights, updated_dist, updated_ood_counts, updated_a, updated_b, pruned = prune_out
             
@@ -198,7 +212,8 @@ class AdaptKANLayerJax(eqx.Module):
                                                    rounding_eps=self.rounding_precision_eps,
                                                    stretch_mode=self.stretch_mode,
                                                    stretch_threshold=self.stretch_threshold,
-                                                   exact_stretch=self.exact_refit)
+                                                   exact_stretch=self.exact_refit,
+                                                   basis_type=self.basis_type)
         
         updated_weights, updated_dist, updated_ood_counts, updated_a, updated_b, stretched = stretch_out
 

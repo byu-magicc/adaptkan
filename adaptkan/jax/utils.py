@@ -387,7 +387,8 @@ def refit_weights_and_counts_jax(weights,
                                  k=1,
                                  rounding_eps=0.0,
                                  rescale_counts=True,
-                                 exact_refit=True): # Change this to false for faster results
+                                 exact_refit=True,
+                                 basis_type="bspline"): # Change this to false for faster results
     """
     Refits weights and counts based on the new domain using linear interpolation and/or linear least squares.
     """
@@ -424,33 +425,35 @@ def refit_weights_and_counts_jax(weights,
     ood_bin_values = ood_counts.at[:, 0].divide(lower_mask_sum)
     ood_bin_values = ood_bin_values.at[:, -1].divide(upper_mask_sum)
 
-    new_counts, _, _ = spline_interpolate_jax(new_domain_centers.T, center_a, center_b, counts[None,:,:], k=1, rounding_eps=rounding_eps, clip_end=False)
-    
-    new_counts = jnp.transpose(new_counts, (1, 2, 0))
-    new_counts = jnp.where(lower_mask[None,:,:], ood_bin_values[None,:,0,None], new_counts)
-    new_counts = jnp.where(upper_mask[None,:,:], ood_bin_values[None,:,1,None], new_counts)
-    new_counts = jnp.squeeze(new_counts, axis=0)
+    # Now refit the weights depending on the basis function we are using
+    if basis_type == "bspline":
+        new_counts, _, _ = spline_interpolate_jax(new_domain_centers.T, center_a, center_b, counts[None,:,:], k=1, rounding_eps=rounding_eps, clip_end=False)
+        
+        new_counts = jnp.transpose(new_counts, (1, 2, 0))
+        new_counts = jnp.where(lower_mask[None,:,:], ood_bin_values[None,:,0,None], new_counts)
+        new_counts = jnp.where(upper_mask[None,:,:], ood_bin_values[None,:,1,None], new_counts)
+        new_counts = jnp.squeeze(new_counts, axis=0)
 
-    greville_pts = compute_greville_jax(a, b, new_num_grid_intervals, k)
-    new_greville_pts= new_a[:,None] + (greville_pts - a[:,None]) * (new_b[:,None] - new_a[:,None]) / (b[:,None] - a[:,None] + 1e-8)
+        greville_pts = compute_greville_jax(a, b, new_num_grid_intervals, k)
+        new_greville_pts= new_a[:,None] + (greville_pts - a[:,None]) * (new_b[:,None] - new_a[:,None]) / (b[:,None] - a[:,None] + 1e-8)
 
-    lower_mask = (new_greville_pts < a[:,None])
-    upper_mask = (new_greville_pts > b[:,None])
+        lower_mask = (new_greville_pts < a[:,None])
+        upper_mask = (new_greville_pts > b[:,None])
 
-    if exact_refit:
-        domain = parallel_linspace_jax(new_a, new_b, 101)
-        out, _, _ = spline_interpolate_jax(domain.T, a, b, weights, k=k, rounding_eps=rounding_eps, clip_end=False)
+        if exact_refit:
+            domain = parallel_linspace_jax(new_a, new_b, 101)
+            out, _, _ = spline_interpolate_jax(domain.T, a, b, weights, k=k, rounding_eps=rounding_eps, clip_end=False)
 
-        out = jnp.transpose(out, (1, 2, 0))
-        new_weights = coefs_from_curve_jax(out, new_a, new_b, new_num_grid_intervals, k=k)
-        new_weights = jnp.where(lower_mask[None,:,:], start_weights[:,:,None], new_weights)
-        new_weights = jnp.where(upper_mask[None,:,:], end_weights[:,:,None], new_weights)
-    else:
-        # Do a rough refitting of the weights via linear interpolation
-        new_weights, _, _ = spline_interpolate_jax(new_greville_pts.T, a, b, weights, k=1, clip_end=False, rounding_eps=rounding_eps)
-        new_weights = jnp.transpose(new_weights, (1, 2, 0))
-        new_weights = jnp.where(lower_mask[None,:,:], start_weights[:,:,None], new_weights)
-        new_weights = jnp.where(upper_mask[None,:,:], end_weights[:,:,None], new_weights)
+            out = jnp.transpose(out, (1, 2, 0))
+            new_weights = coefs_from_curve_jax(out, new_a, new_b, new_num_grid_intervals, k=k)
+            new_weights = jnp.where(lower_mask[None,:,:], start_weights[:,:,None], new_weights)
+            new_weights = jnp.where(upper_mask[None,:,:], end_weights[:,:,None], new_weights)
+        else:
+            # Do a rough refitting of the weights via linear interpolation
+            new_weights, _, _ = spline_interpolate_jax(new_greville_pts.T, a, b, weights, k=1, clip_end=False, rounding_eps=rounding_eps)
+            new_weights = jnp.transpose(new_weights, (1, 2, 0))
+            new_weights = jnp.where(lower_mask[None,:,:], start_weights[:,:,None], new_weights)
+            new_weights = jnp.where(upper_mask[None,:,:], end_weights[:,:,None], new_weights)
 
     # This removes parts of the ood_counts that we aren't using anymore from stretching
     ood_mask = jnp.vstack([lower_mask.any(axis=-1), upper_mask.any(axis=-1)]).T
@@ -495,7 +498,7 @@ def refit_weights_and_counts_jax(weights,
 
     return new_weights, new_counts, new_ood_counts
 
-def _stretch_weights_and_counts_jax(combined_mask, activation_weights, data_counts, ood_counts, a, b, ood_a, ood_b, k, rounding_eps, exact_stretch):
+def _stretch_weights_and_counts_jax(combined_mask, activation_weights, data_counts, ood_counts, a, b, ood_a, ood_b, k, rounding_eps, exact_stretch, basis_type):
     # Determine the new domain boundaries
     new_a = jnp.where(combined_mask, ood_a, a) # TODO Replace combined_mask with a_mask and b_mask
     new_b = jnp.where(combined_mask, ood_b, b)
@@ -512,12 +515,13 @@ def _stretch_weights_and_counts_jax(combined_mask, activation_weights, data_coun
         new_b=new_b,
         k=k,
         rounding_eps=rounding_eps,
-        exact_refit=exact_stretch
+        exact_refit=exact_stretch,
+        basis_type=basis_type
     )
         
     return new_weights, new_counts, new_ood_counts, new_a, new_b
 
-def stretch_weights_and_counts_jax(activation_weights, data_counts, ood_counts, a, b, ood_a, ood_b, k, rounding_eps, stretch_mode="max", stretch_threshold=None, exact_stretch=False):
+def stretch_weights_and_counts_jax(activation_weights, data_counts, ood_counts, a, b, ood_a, ood_b, k, rounding_eps, stretch_mode="max", stretch_threshold=None, exact_stretch=False, basis_type="bspline"):
     
     # Figure out if we need to stretch the weights or not
     if stretch_mode == "max":
@@ -548,7 +552,7 @@ def stretch_weights_and_counts_jax(activation_weights, data_counts, ood_counts, 
     # TODO Replace combined_mask with a_mask, b_mask
     updated_weights, updated_counts, updated_ood_counts, updated_a, updated_b = jax.lax.cond(
         stretch,
-        lambda: _stretch_weights_and_counts_jax(combined_mask, activation_weights, data_counts, ood_counts, a, b, ood_a, ood_b, k, rounding_eps, exact_stretch),
+        lambda: _stretch_weights_and_counts_jax(combined_mask, activation_weights, data_counts, ood_counts, a, b, ood_a, ood_b, k, rounding_eps, exact_stretch, basis_type),
         lambda: (activation_weights, data_counts, ood_counts, a, b)
     )
 
@@ -556,6 +560,68 @@ def stretch_weights_and_counts_jax(activation_weights, data_counts, ood_counts, 
     #     print("Stretching:", stretch, a_mask, b_mask, updated_a, updated_b)
     
     return updated_weights, updated_counts, updated_ood_counts, updated_a, updated_b, stretch
+
+def _stretch_counts_jax(combined_mask, data_counts, ood_counts, a, b, ood_a, ood_b, k, rounding_eps, exact_stretch):
+    # Determine the new domain boundaries
+    new_a = jnp.where(combined_mask, ood_a, a) # TODO Replace combined_mask with a_mask and b_mask
+    new_b = jnp.where(combined_mask, ood_b, b)
+    degree = data_counts.shape[-1]
+
+    # TODO, need to define this function:
+    new_counts, new_ood_counts = refit_counts_jax(
+        data_counts,
+        ood_counts,
+        a,
+        b,
+        degree=degree, # This stays the same during stretching
+        new_a=new_a,
+        new_b=new_b,
+        k=k,
+        rounding_eps=rounding_eps,
+        exact_refit=exact_stretch
+    )
+        
+    return new_counts, new_ood_counts, new_a, new_b
+
+def stretch_counts_jax(data_counts, ood_counts, a, b, ood_a, ood_b, k, rounding_eps, stretch_mode="max", stretch_threshold=None, exact_stretch=False):
+    
+    # Figure out if we need to stretch the weights or not
+    if stretch_mode == "max":
+        a_mask = data_counts.max(-1) < ood_counts[:, 0] # data_counts[:, 0] < ood_counts[:, 0]
+        b_mask = data_counts.max(-1) < ood_counts[:, -1] # data_counts[:, -1] < ood_counts[:, -1]
+    elif stretch_mode == "half_max":
+        a_mask = data_counts.max(-1)*0.5 < ood_counts[:, 0]
+        b_mask = data_counts.max(-1)*0.5 < ood_counts[:, -1]
+    elif stretch_mode == "mean":
+        a_mask = data_counts.mean(-1) < ood_counts[:, 0]
+        b_mask = data_counts.mean(-1) < ood_counts[:, -1]
+    elif stretch_mode == "edge":
+        a_mask = data_counts[:, 0] < ood_counts[:, 0]
+        b_mask = data_counts[:, -1] < ood_counts[:, -1]
+    elif stretch_mode == "threshold":
+        a_mask = data_counts.max(-1) < stretch_threshold
+        b_mask = data_counts.max(-1) < stretch_threshold
+    elif stretch_mode == "relative":
+        a_mask = data_counts.min(-1) < ood_counts[:, 0]*0.1
+        b_mask = data_counts.min(-1) < ood_counts[:, -1]*0.1
+    elif stretch_mode == "interval":
+        a_mask = jnp.ones_like(data_counts[:, 0], dtype=bool)
+        b_mask = jnp.ones_like(data_counts[:, -1], dtype=bool)
+    
+    combined_mask = a_mask | b_mask
+    stretch = jnp.any(combined_mask)
+    
+    # TODO Replace combined_mask with a_mask, b_mask
+    updated_weights, updated_counts, updated_ood_counts, updated_a, updated_b = jax.lax.cond(
+        stretch,
+        lambda: _stretch_counts_jax(combined_mask, data_counts, ood_counts, a, b, ood_a, ood_b, k, rounding_eps, exact_stretch),
+        lambda: (data_counts, ood_counts, a, b)
+    )
+
+    # if stretch:
+    #     print("Stretching:", stretch, a_mask, b_mask, updated_a, updated_b)
+    
+    return updated_counts, updated_ood_counts, updated_a, updated_b, stretch
 
 def shrink_domain(data_counts, ood_counts, thresh):
     # Compute combined mask for pruning
@@ -567,7 +633,7 @@ def shrink_domain(data_counts, ood_counts, thresh):
     combined_mask = (lower_mask & lower_ood_mask) | (upper_mask & upper_ood_mask)
     return combined_mask
 
-def _shrink_weights_and_counts_jax(weights, data_counts, ood_counts, a, b, thresh, num_grid_intervals, min_delta, k, rounding_eps, exact_refit):
+def _shrink_weights_and_counts_jax(weights, data_counts, ood_counts, a, b, thresh, num_grid_intervals, min_delta, k, rounding_eps, exact_refit, basis_type):
     # Create mask for counts above threshold
     # masked_weight_counts = jnp.where(combined_mask[:, None], weight_counts, -jnp.inf)
     above_thresh_mask = (data_counts > thresh).astype(float)
@@ -598,12 +664,13 @@ def _shrink_weights_and_counts_jax(weights, data_counts, ood_counts, a, b, thres
         new_b=new_b,
         k=k,
         rounding_eps=rounding_eps,
-        exact_refit=exact_refit
+        exact_refit=exact_refit,
+        basis_type=basis_type
     )
 
     return new_weights, new_counts, new_ood_counts, new_a, new_b
 
-def shrink_weights_and_counts_jax(thresh, activation_weights, a, b, num_grid_intervals, data_counts, ood_counts, k, rounding_eps, min_delta=1e-4, exact_shrink=False):
+def shrink_weights_and_counts_jax(thresh, activation_weights, a, b, num_grid_intervals, data_counts, ood_counts, k, rounding_eps, min_delta=1e-4, exact_shrink=False, basis_type="spline"):
     combined_mask = shrink_domain(data_counts, ood_counts, thresh)
     needs_shrinking = jnp.any(combined_mask)
     counts_nonempty = jnp.any(data_counts > 0)
@@ -611,7 +678,7 @@ def shrink_weights_and_counts_jax(thresh, activation_weights, a, b, num_grid_int
 
     new_weights, new_counts, new_ood_counts, new_a, new_b = jax.lax.cond(
         shrunk,
-        lambda: _shrink_weights_and_counts_jax(activation_weights, data_counts, ood_counts, a, b, thresh, num_grid_intervals, min_delta, k, rounding_eps, exact_shrink),
+        lambda: _shrink_weights_and_counts_jax(activation_weights, data_counts, ood_counts, a, b, thresh, num_grid_intervals, min_delta, k, rounding_eps, exact_shrink, basis_type),
         lambda: (activation_weights, data_counts, ood_counts, a, b)
     )
 
@@ -695,3 +762,45 @@ def compute_marginal_log_likelihood(indices: jnp.ndarray,
     # clip to avoid log(0), take log, then sum over dimensions
     log_probs = jnp.log(jnp.clip(bin_probs, a_min=1e-10))
     return jnp.sum(log_probs, axis=0)          # shape (n,)
+
+# Generated by gemini
+def cheby_coefs_from_curve_jax(y_eval, degree, n_pts=101):
+    """
+    Refits Chebyshev coefficients to a set of target y-values over a new domain [a, b].
+    
+    y_eval: (out_dim, in_dim, n_pts) - the target curve values
+    a, b: (in_dim,) - the domain boundaries
+    degree: int - the polynomial degree (D)
+    """
+    out_dim, in_dim, _ = y_eval.shape
+    
+    # 1. Create a standardized linspace in [-1, 1] for the solver
+    # This represents the points in the new domain [a, b]
+    x_standard = jnp.linspace(-1, 1, n_pts)
+    
+    # 2. Build the Vandermonde Matrix (The Basis Matrix)
+    # Shape: (n_pts, degree + 1)
+    def get_vandermonde(x):
+        basis = [jnp.ones_like(x), x]
+        for _ in range(2, degree + 1):
+            basis.append(2.0 * x * basis[-1] - basis[-2])
+        return jnp.stack(basis, axis=-1)
+
+    # Phi is the matrix of basis functions evaluated at n_pts
+    Phi = get_vandermonde(x_standard) 
+    
+    # 3. Solve Least Squares: Phi @ weights = y_eval
+    # We want to solve for weights: (out_dim, in_dim, degree + 1)
+    # JAX's lstsq handles the batching via vmap efficiently
+    
+    def solve_single_channel(target_y):
+        # target_y shape: (n_pts,)
+        # Phi shape: (n_pts, degree + 1)
+        coefs, _, _, _ = jnp.linalg.lstsq(Phi, target_y)
+        return coefs
+
+    # Vmap over out_dim and in_dim
+    # Resulting weights: (out_dim, in_dim, degree + 1)
+    new_weights = jax.vmap(jax.vmap(solve_single_channel))(y_eval)
+    
+    return new_weights
