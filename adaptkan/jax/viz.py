@@ -8,6 +8,7 @@ import numpy as np
 from PIL import Image
 
 from adaptkan.jax.utils import (
+    chebyshev_interpolate_jax,
     spline_interpolate_jax,
     parallel_linspace_jax)
 
@@ -41,6 +42,7 @@ def plot_layer(
         layer_index,
         layer.k,
         layer.rounding_precision_eps,
+        basis_type=layer.basis_type,
         square_size=square_size,
         fontsize=fontsize,
         domain_input_size=domain_input_size,
@@ -67,6 +69,7 @@ def plot_layer_from_weights(
     layer_index,
     layer_k,
     layer_rounding_precision_eps,
+    basis_type="bspline",
     square_size=1.3,
     fontsize=6,
     domain_input_size=100,
@@ -81,7 +84,13 @@ def plot_layer_from_weights(
         
     # Pull out weights & counts
     domains = parallel_linspace_jax(layer_a, layer_b, domain_input_size+1)
-    preds, _, _ = spline_interpolate_jax(domains.T, layer_a, layer_b, layer_weights, layer_k, layer_rounding_precision_eps)
+
+    if basis_type == "bspline":
+        preds, _, _ = spline_interpolate_jax(domains.T, layer_a, layer_b, layer_weights, layer_k, layer_rounding_precision_eps)
+    elif basis_type == "chebyshev":
+        preds, _, _ = chebyshev_interpolate_jax(domains.T, layer_a, layer_b, layer_weights, layer_rounding_precision_eps)
+    else:
+        raise NotImplementedError("Only B-spline basis is currently supported in plotting.")
     
     m, n, _ = layer_weights.shape
 

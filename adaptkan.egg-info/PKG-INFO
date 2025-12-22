@@ -90,6 +90,7 @@ Requires-Dist: tensorboard
 Requires-Dist: pykan
 Requires-Dist: jupyter
 Requires-Dist: plotly
+Requires-Dist: pyqt5>=5.15.11
 Provides-Extra: cuda
 Requires-Dist: libmr==0.1.9; extra == "cuda"
 Requires-Dist: jax[cuda12_pip]==0.4.38; extra == "cuda"
@@ -102,19 +103,18 @@ Dynamic: license-file
 
 # AdaptKAN
 
-![Demo](assets/digits.gif)
+![Demo](assets/digits_cropped.gif)
 
 Code respository for "Automatic Grid Updates for Komolgorov Arnold Networks using Layer Histograms."
 
-AdaptKAN provides implementations of Kolmogorov-Arnold Networks (KANs) with support for adaptable continual learning, available in JAX.
+AdaptKAN provides implementations of Kolmogorov-Arnold Networks (KANs) with support for out-of-distribution detection, available in JAX.
 
 ## Features
 
-- **Customizable Layers**: Control noise injection, grid refinements, and pruning strategies.
-- **Continual Learning**: Adapt model weights online with minimal overhead.
+- **Customizable Layers**: Grid refinement, edge/node pruning, and automatic domain grid adjustment.
 - **Data Utilities**: Parsers and dataset builders for the benchmarks in the paper.
-- **Training Scripts**: Convenient scripts for Feynman and Lyapunov tasks.
-- **Examples**: Jupyter notebooks in `examples/` to get started quickly.
+- **Training Scripts**: Convenient scripts for Feynman, Lyapunov, image classification, and OOD tasks.
+- **Examples**: See `adaptkan_tutorial.ipynb` to get started quickly.
 
 ## Installation 🚀
 
@@ -132,13 +132,11 @@ The following steps will guide you through setting up the project using **uv**.
     git clone git@github.com:your-username/adaptkan.git
     cd adaptkan
     ```
-
 2.  **Install `uv`**
     Install uv to easily setup the environment.
     ```bash
     wget -qO- https://astral.sh/uv/install.sh | sh
     ```
-
 3.  **Sync Dependencies from Lock File**
     Use `uv` to install the exact versions of all external packages from the lock file. This guarantees a reproducible base environment.
     ```bash
@@ -200,4 +198,13 @@ This project is under the GPL-3.0 License. See [LICENSE](LICENSE) for details.
 
 ## Citation
 
-Please use of this project in your code with: TODO
+Please use of this project in your code with:
+
+```bibtex
+@article{moody2025automatic,
+  title={Automatic Grid Updates for Kolmogorov-Arnold Networks using Layer Histograms},
+  author={Moody, Jamison and Usevitch, James},
+  journal={arXiv preprint arXiv:2511.08570},
+  year={2025}
+}
+```

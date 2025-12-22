@@ -58,11 +58,12 @@ class AdaptKANJax(eqx.Module):
                  activation_strategy='linear', # Either 'linear', 'zero', or 'kan'. Linear is simple and works well
                  min_delta=1e-4, # The minimium distance between the upper and lower bounds of the domain
                  rounding_precision_eps=0.0,
-                 k=3, # Bspline order
+                 k=3, # Bspline order (ignored if using chebyshev)
                  stretch_mode="max", # Either "mean", "max", "half_max", "edge", or "relative"
                  stretch_threshold=None, # Used with the relative stretch mode
                  prune_mode="default", # Either "default" or "relative". Default works well
                  exact_refit=True, # Turning this to false sacrifices accuracy but is faster
+                 basis_type="bspline", # Either "bspline" or "chebyshev"
                  seed = 0):
         
         super(AdaptKANJax, self).__init__()
@@ -113,6 +114,7 @@ class AdaptKANJax(eqx.Module):
                                     prune_mode=prune_mode,
                                     exact_refit=exact_refit,
                                     rounding_precision_eps=rounding_precision_eps,
+                                    basis_type=basis_type,
                                     k=k,
                                     key=keys[i])
             self.layers.append(layer)

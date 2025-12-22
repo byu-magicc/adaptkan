@@ -81,6 +81,7 @@ tensorboard
 pykan
 jupyter
 plotly
+pyqt5>=5.15.11
 
 [cpu]
 jax[cpu]==0.4.38
