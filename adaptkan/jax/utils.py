@@ -183,7 +183,7 @@ def compute_chebyshev_basis(x, a, b, degree):
     Crucially, it clips x to [a, b] to prevent recursion explosion outside domain.
     """
     # Map x to [-1, 1]
-    x_scaled = 2.0 * (x - a) / (b - a) - 1.0
+    x_scaled = 2.0 * (x - a[:, None]) / (b[:, None] - a[:, None]) - 1.0
     # --- CRITICAL STEP FOR EXTENSIONS ---
     # Clip to avoid NaNs in recursive loops outside [-1, 1]
     x_scaled = jnp.clip(x_scaled, -1.0, 1.0)
@@ -226,6 +226,7 @@ def chebyshev_interpolate_jax(x, a, b, weights, num_grid_intervals, rounding_eps
     alphas = x_adjusted / deltas + rounding_eps - jnp.floor(x_adjusted / deltas + rounding_eps)
 
     # Use k (derived from weights) for polynomial degree
+    # basis = vmap(compute_chebyshev_basis, in_axes=(0, None, None, None))(x, a, b, k)
     basis = compute_chebyshev_basis(x, a, b, degree=k)
     out = jnp.einsum('bik,oik->boi', basis, weights)
 
@@ -250,9 +251,9 @@ def cheby_summation_oversampled_refit(old_weights, old_a, old_b, new_a, new_b, n
     M = int(max(old_k, new_k) * oversample_ratio)  # Sample enough points for both
 
     # 1. Get M Gauss-Lobatto nodes in the NEW domain
-    i = jnp.arange(M + 1)
+    i = jnp.arange(M + 1)[None, :]
     nodes_std = jnp.cos(jnp.pi * i / M)
-    x_phys = new_a + (nodes_std + 1.0) * (new_b - new_a) / 2.0
+    x_phys = new_a[:, None] + (nodes_std + 1.0) * (new_b[:, None] - new_a[:, None]) / 2.0
 
     # 2. Evaluate OLD function at these M nodes
     # Using the original weights and bounds captures the 'Retention' data
