@@ -88,9 +88,9 @@ def plot_layer_from_weights(
     if basis_type == "bspline":
         preds, _, _ = spline_interpolate_jax(domains.T, layer_a, layer_b, layer_weights, layer_k, layer_rounding_precision_eps)
     elif basis_type == "chebyshev":
-        preds, _, _ = chebyshev_interpolate_jax(domains.T, layer_a, layer_b, layer_weights, layer_rounding_precision_eps)
+        preds, _, _ = chebyshev_interpolate_jax(domains.T, layer_a, layer_b, layer_weights, layer_num_grid_intervals, layer_rounding_precision_eps)
     else:
-        raise NotImplementedError("Only B-spline basis is currently supported in plotting.")
+        raise NotImplementedError("Only B-spline and Chebyshev basis are currently supported in plotting.")
     
     m, n, _ = layer_weights.shape
 

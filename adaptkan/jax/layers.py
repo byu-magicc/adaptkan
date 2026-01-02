@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 from adaptkan.jax.utils import (compute_marginal_log_likelihood,
                                 spline_interpolate_jax,
+                                chebyshev_interpolate_jax,
                                 shrink_weights_and_counts_jax,
                                 stretch_weights_and_counts_jax,
                                 refit_weights_and_counts_jax,
@@ -163,8 +164,8 @@ class AdaptKANLayerJax(eqx.Module):
         elif basis_type == "chebyshev":
             # Recommended by Gemini
             if activation_strategy == "linear":
-                weights = jax.random.normal(key, (output_dim, input_dim, num_grid_intervals + 1)) * 0.01
-                
+                weights = jax.random.normal(key, (output_dim, input_dim, k + 1)) * 0.01
+
                 # Set T1 (index 1) to a 'LeCun' scale to preserve signal variance
                 # This makes the KAN behave like a standard linear layer at start
                 std = 1.0 / jnp.sqrt(input_dim)
@@ -204,11 +205,12 @@ class AdaptKANLayerJax(eqx.Module):
         stretch_out = stretch_weights_and_counts_jax(updated_weights,
                                                    updated_dist,
                                                    updated_ood_counts,
-                                                   updated_a, 
+                                                   updated_a,
                                                    updated_b,
                                                    state.get(self.ood_a),
                                                    state.get(self.ood_b),
                                                    k=self.k,
+                                                   num_grid_intervals=self.num_grid_intervals,
                                                    rounding_eps=self.rounding_precision_eps,
                                                    stretch_mode=self.stretch_mode,
                                                    stretch_threshold=self.stretch_threshold,
@@ -234,7 +236,6 @@ class AdaptKANLayerJax(eqx.Module):
 
         new_a = state.get(self.ood_a)
         new_b = state.get(self.ood_b)
-        num_grid_intervals = self.weights.shape[-1] - self.k
 
         updated_weights, updated_counts, updated_ood_counts = refit_weights_and_counts_jax(
             self.weights,
@@ -242,12 +243,13 @@ class AdaptKANLayerJax(eqx.Module):
             state.get(self.ood_data_counts),
             state.get(self.a),
             state.get(self.b),
-            new_num_grid_intervals=num_grid_intervals, # This stays the same during stretching
+            new_num_grid_intervals=self.num_grid_intervals,  # Use stored value directly
             new_a=new_a,
             new_b=new_b,
             k=self.k,
             rounding_eps=self.rounding_precision_eps,
-            exact_refit=self.exact_refit
+            exact_refit=self.exact_refit,
+            basis_type=self.basis_type
         )
 
         # Set the new state "buffers"
@@ -325,12 +327,20 @@ class AdaptKANLayerJax(eqx.Module):
 
     def basic_forward(self, x, state):
 
-        postsplines, alphas, indices = spline_interpolate_jax(x,
-                                                    state.get(self.a),
-                                                    state.get(self.b),
-                                                    self.weights,
-                                                    self.k,
-                                                    self.rounding_precision_eps)
+        if self.basis_type == "bspline":
+            postsplines, alphas, indices = spline_interpolate_jax(x,
+                                                        state.get(self.a),
+                                                        state.get(self.b),
+                                                        self.weights,
+                                                        self.k,
+                                                        self.rounding_precision_eps)
+        elif self.basis_type == "chebyshev":
+            postsplines, alphas, indices = chebyshev_interpolate_jax(x,
+                                                        state.get(self.a),
+                                                        state.get(self.b),
+                                                        self.weights,
+                                                        self.num_grid_intervals,
+                                                        self.rounding_precision_eps)
 
         base = self.base_fun(x)
         y = self.scale_base * base[:,None,:] + self.scale_sp * postsplines
@@ -384,19 +394,48 @@ class AdaptKANLayerJax(eqx.Module):
     
     def refine(self, weights, data_counts, new_state, new_num_grid_intervals):
 
-        refined_weights, refined_counts, refined_ood_counts = refit_weights_and_counts_jax(weights,
-                                                                data_counts,
-                                                                new_state.get(self.ood_data_counts),
-                                                                new_state.get(self.a),
-                                                                new_state.get(self.b),
-                                                                new_num_grid_intervals,
-                                                                new_a=new_state.get(self.a),
-                                                                new_b=new_state.get(self.b),
-                                                                k=self.k,
-                                                                exact_refit=True)
-        
-        new_state = new_state.set(self.data_counts, refined_counts)
-        new_state = new_state.set(self.ood_data_counts, refined_ood_counts)
-        layer = eqx.tree_at(lambda l: l.weights, self, refined_weights)
+        if self.basis_type == "bspline":
+            # For B-splines: increase num_grid_intervals (more control points)
+            refined_weights, refined_counts, refined_ood_counts = refit_weights_and_counts_jax(
+                weights,
+                data_counts,
+                new_state.get(self.ood_data_counts),
+                new_state.get(self.a),
+                new_state.get(self.b),
+                new_num_grid_intervals,
+                new_a=new_state.get(self.a),
+                new_b=new_state.get(self.b),
+                k=self.k,
+                exact_refit=True,
+                basis_type=self.basis_type
+            )
+
+            new_state = new_state.set(self.data_counts, refined_counts)
+            new_state = new_state.set(self.ood_data_counts, refined_ood_counts)
+            layer = eqx.tree_at(lambda l: l.weights, self, refined_weights)
+            layer = eqx.tree_at(lambda l: l.num_grid_intervals, layer, new_num_grid_intervals)
+
+        elif self.basis_type == "chebyshev":
+            # For Chebyshev: increase k (polynomial degree)
+            # Here new_num_grid_intervals is interpreted as new_k
+            new_k = new_num_grid_intervals
+            refined_weights, refined_counts, refined_ood_counts = refit_weights_and_counts_jax(
+                weights,
+                data_counts,
+                new_state.get(self.ood_data_counts),
+                new_state.get(self.a),
+                new_state.get(self.b),
+                self.num_grid_intervals,  # num_grid_intervals stays the same
+                new_a=new_state.get(self.a),
+                new_b=new_state.get(self.b),
+                k=new_k,  # Pass new_k for Chebyshev degree
+                exact_refit=True,
+                basis_type=self.basis_type
+            )
+
+            new_state = new_state.set(self.data_counts, refined_counts)
+            new_state = new_state.set(self.ood_data_counts, refined_ood_counts)
+            layer = eqx.tree_at(lambda l: l.weights, self, refined_weights)
+            layer = eqx.tree_at(lambda l: l.k, layer, new_k)
 
         return layer, new_state
