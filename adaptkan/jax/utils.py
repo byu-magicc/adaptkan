@@ -181,9 +181,17 @@ def compute_chebyshev_basis(x, a, b, degree):
     """
     Maps x -> [-1, 1] and computes Chebyshev polynomials recursively.
     Crucially, it clips x to [a, b] to prevent recursion explosion outside domain.
+
+    Args:
+        x: Input data, shape (batch, in_dim) or (M+1, in_dim)
+        a, b: Domain boundaries, shape (in_dim,)
+        degree: Polynomial degree
+
+    Returns:
+        basis: Chebyshev basis, shape (batch, in_dim, degree+1)
     """
-    # Map x to [-1, 1]
-    x_scaled = 2.0 * (x - a) / (b - a) - 1.0
+    # Map x to [-1, 1], broadcasting a and b for batch dimension
+    x_scaled = 2.0 * (x - a[None, :]) / (b[None, :] - a[None, :]) - 1.0
     # --- CRITICAL STEP FOR EXTENSIONS ---
     # Clip to avoid NaNs in recursive loops outside [-1, 1]
     x_scaled = jnp.clip(x_scaled, -1.0, 1.0)
@@ -246,18 +254,24 @@ def cheby_summation_oversampled_refit(old_weights, old_a, old_b, new_a, new_b, n
     Returns:
         new_weights: New Chebyshev coefficients, shape (out_dim, in_dim, new_k+1)
     """
+    out_dim, in_dim, _ = old_weights.shape
     old_k = old_weights.shape[-1] - 1  # Derive old degree from weights
     M = int(max(old_k, new_k) * oversample_ratio)  # Sample enough points for both
 
     # 1. Get M Gauss-Lobatto nodes in the NEW domain
+    # nodes_std has shape (M+1,), new_a/new_b have shape (in_dim,)
+    # x_phys should have shape (M+1, in_dim)
     i = jnp.arange(M + 1)
-    nodes_std = jnp.cos(jnp.pi * i / M)
-    x_phys = new_a + (nodes_std + 1.0) * (new_b - new_a) / 2.0
+    nodes_std = jnp.cos(jnp.pi * i / M)  # (M+1,)
+    # Broadcast: (M+1, 1) with (in_dim,) -> (M+1, in_dim)
+    x_phys = new_a[None, :] + (nodes_std[:, None] + 1.0) * (new_b[None, :] - new_a[None, :]) / 2.0
 
     # 2. Evaluate OLD function at these M nodes
     # Using the original weights and bounds captures the 'Retention' data
+    # basis has shape (M+1, in_dim, old_k+1)
     basis = compute_chebyshev_basis(x_phys, old_a, old_b, degree=old_k)
-    y_targets = jnp.einsum('bik,oik->boi', basis, old_weights)
+    # y_targets has shape (M+1, out_dim, in_dim) after einsum
+    y_targets = jnp.einsum('mik,oik->moi', basis, old_weights)
 
     # 3. Discrete Least Squares via DCT logic
     # Scale endpoints for the trapezoidal rule weights
@@ -265,20 +279,23 @@ def cheby_summation_oversampled_refit(old_weights, old_a, old_b, new_a, new_b, n
     weights_vec = weights_vec.at[0].set(0.5)
     weights_vec = weights_vec.at[-1].set(0.5)
 
-    # Normalize targets
-    y_weighted = y_targets * weights_vec
+    # Normalize targets: y_targets is (M+1, out_dim, in_dim), weights_vec is (M+1,)
+    # Broadcast weights_vec to (M+1, 1, 1)
+    y_weighted = y_targets * weights_vec[:, None, None]
 
     # 4. Generate the Projection Matrix (Size: new_k+1 x M+1)
     k_idx = jnp.arange(new_k + 1)
     j_idx = jnp.arange(M + 1)
     # Cosine basis: cos(k * pi * j / M)
-    projection = jnp.cos(k_idx[:, None] * j_idx[None, :] * jnp.pi / M)
+    projection = jnp.cos(k_idx[:, None] * j_idx[None, :] * jnp.pi / M)  # (new_k+1, M+1)
 
     # 5. Calculate New Coefficients
-    new_weights = (2.0 / M) * jnp.matmul(projection, y_weighted)
+    # Contract: projection (new_k+1, M+1) with y_weighted (M+1, out_dim, in_dim)
+    # Result should be (out_dim, in_dim, new_k+1)
+    new_weights = (2.0 / M) * jnp.einsum('km,moi->oik', projection, y_weighted)
 
-    # Apply the standard Chebyshev c0 scaling
-    new_weights = new_weights.at[0].multiply(0.5)
+    # Apply the standard Chebyshev c0 scaling to the first coefficient (k=0)
+    new_weights = new_weights.at[:, :, 0].multiply(0.5)
 
     return new_weights
 
