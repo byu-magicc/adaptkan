@@ -202,6 +202,250 @@ def compute_chebyshev_basis(x, a, b, degree):
         basis.append(next_t)
     return jnp.stack(basis, axis=-1)
 
+
+def build_constraint_matrix(constraints, a, b, degree):
+    """
+    Build the constraint matrix C for Chebyshev polynomial constraints.
+
+    Each constraint specifies: φ^{(d)}(x) = y, where d is the derivative order.
+    The p-th row of C is: [T_0^{(d_p)}(x_p), T_1^{(d_p)}(x_p), ..., T_k^{(d_p)}(x_p)]
+
+    Args:
+        constraints: List of tuples (x, y, d) where:
+            - x: evaluation point in physical domain
+            - y: target value
+            - d: derivative order (0 = value, 1 = first derivative, etc.)
+        a, b: Domain boundaries (scalars)
+        degree: Chebyshev polynomial degree k
+
+    Returns:
+        C: Constraint matrix, shape (N, k+1) where N = len(constraints)
+        y_vec: Target values vector, shape (N,)
+    """
+    N = len(constraints)
+    k = degree
+
+    C_rows = []
+    y_values = []
+
+    for (x_val, y_val, deriv_order) in constraints:
+        # Compute the row: [T_0^{(d)}(x), T_1^{(d)}(x), ..., T_k^{(d)}(x)]
+        x_arr = jnp.array([x_val])
+        basis_row = compute_chebyshev_derivative_basis(x_arr, a, b, degree, derivative_order=deriv_order)
+        C_rows.append(basis_row[0])  # Shape (k+1,)
+        y_values.append(y_val)
+
+    C = jnp.stack(C_rows, axis=0)  # Shape (N, k+1)
+    y_vec = jnp.array(y_values)    # Shape (N,)
+
+    return C, y_vec
+
+
+def compute_constraint_projection_operator(C):
+    """
+    Compute the projection operator for weight constraints.
+
+    The projection formula is:
+        ŵ = w - C^T (C C^T)^{-1} (Cw - y)
+
+    This function precomputes P = C^T (C C^T)^{-1}, so during forward pass:
+        ŵ = w - P @ (C @ w - y)
+
+    Args:
+        C: Constraint matrix, shape (N, k+1)
+
+    Returns:
+        P: Projection operator, shape (k+1, N)
+
+    Note:
+        - Requires N <= k (more coefficients than constraints) for null space to exist
+        - Uses pseudo-inverse for numerical stability
+    """
+    # C C^T has shape (N, N)
+    CCT = C @ C.T
+
+    # Compute (C C^T)^{-1} using pseudo-inverse for stability
+    CCT_inv = jnp.linalg.pinv(CCT)
+
+    # P = C^T @ (C C^T)^{-1}, shape (k+1, N)
+    P = C.T @ CCT_inv
+
+    return P
+
+
+def project_weights(weights, C, P, y_vec):
+    """
+    Project weights to satisfy constraints.
+
+    Formula: ŵ = w - P @ (C @ w - y)
+
+    This projects w onto the affine subspace where C @ ŵ = y.
+
+    Args:
+        weights: Original weights, shape (..., k+1) - can be batched
+        C: Constraint matrix, shape (N, k+1)
+        P: Projection operator from compute_constraint_projection_operator, shape (k+1, N)
+        y_vec: Target constraint values, shape (N,)
+
+    Returns:
+        projected_weights: Weights satisfying constraints, shape (..., k+1)
+    """
+    # Compute constraint violation: C @ w - y
+    # For batched weights (..., k+1), we need to handle the matmul correctly
+
+    # C @ w: (N, k+1) @ (..., k+1) -> need einsum for batching
+    # violation = C @ weights - y_vec
+    violation = jnp.einsum('nk,...k->...n', C, weights) - y_vec
+
+    # Correction: P @ violation
+    # P: (k+1, N), violation: (..., N) -> (..., k+1)
+    correction = jnp.einsum('kn,...n->...k', P, violation)
+
+    # Project
+    projected_weights = weights - correction
+
+    return projected_weights
+
+
+def compute_chebyshev_derivative_basis(x, a, b, degree, derivative_order=1):
+    """
+    Computes the d-th derivative of Chebyshev polynomials T_0, T_1, ..., T_k
+    evaluated at points x, accounting for domain scaling from [a, b] to [-1, 1].
+
+    Mathematical background:
+    - T_n'(z) = n * U_{n-1}(z) where U_n is Chebyshev polynomial of second kind
+    - U_n has recurrence: U_0(z) = 1, U_1(z) = 2z, U_{n+1}(z) = 2z*U_n(z) - U_{n-1}(z)
+    - For domain [a, b], chain rule gives: d/dx = (2/(b-a)) * d/dz
+
+    Args:
+        x: Input data in physical domain, shape (batch, in_dim) or (n_points,) for 1D
+        a, b: Domain boundaries, shape (in_dim,) or scalar
+        degree: Maximum polynomial degree k
+        derivative_order: Order of derivative (0 = no derivative, 1 = first derivative, etc.)
+
+    Returns:
+        derivative_basis: Shape (batch, in_dim, degree+1) or (n_points, degree+1)
+                         Contains [T_0^{(d)}(x), T_1^{(d)}(x), ..., T_k^{(d)}(x)]
+    """
+    # Handle scalar a, b for 1D case
+    a = jnp.atleast_1d(jnp.asarray(a))
+    b = jnp.atleast_1d(jnp.asarray(b))
+
+    # Handle 1D input (n_points,) -> (n_points, 1)
+    x_orig_shape = x.shape
+    if x.ndim == 1:
+        x = x[:, None]
+
+    # Map x to [-1, 1]
+    x_scaled = 2.0 * (x - a[None, :]) / (b[None, :] - a[None, :]) - 1.0
+    x_scaled = jnp.clip(x_scaled, -1.0, 1.0)
+
+    # Chain rule scaling factor: (2/(b-a))^d
+    scale_factor = (2.0 / (b[None, :] - a[None, :])) ** derivative_order
+
+    if derivative_order == 0:
+        # No derivative - just return regular Chebyshev basis
+        basis = [jnp.ones_like(x_scaled), x_scaled]
+        for _ in range(2, degree + 1):
+            next_t = 2.0 * x_scaled * basis[-1] - basis[-2]
+            basis.append(next_t)
+        result = jnp.stack(basis, axis=-1)
+
+    elif derivative_order == 1:
+        # First derivative: T_n'(z) = n * U_{n-1}(z)
+        # Compute Chebyshev polynomials of second kind U_n
+        # U_0 = 1, U_1 = 2z, U_{n+1} = 2z*U_n - U_{n-1}
+
+        # T_0' = 0
+        # T_1' = 1
+        # T_n' = n * U_{n-1} for n >= 1
+
+        deriv_basis = [jnp.zeros_like(x_scaled)]  # T_0' = 0
+
+        if degree >= 1:
+            deriv_basis.append(jnp.ones_like(x_scaled))  # T_1' = 1
+
+        if degree >= 2:
+            # We need U_0, U_1, ..., U_{degree-1} to compute T_2', ..., T_degree'
+            U = [jnp.ones_like(x_scaled), 2.0 * x_scaled]  # U_0, U_1
+            for n in range(2, degree):
+                U_next = 2.0 * x_scaled * U[-1] - U[-2]
+                U.append(U_next)
+
+            # T_n' = n * U_{n-1}
+            for n in range(2, degree + 1):
+                deriv_basis.append(n * U[n - 1])
+
+        result = jnp.stack(deriv_basis, axis=-1) * scale_factor[:, :, None]
+
+    elif derivative_order == 2:
+        # Second derivative: T_n''(z) = n * U_{n-1}'(z) = n * (n * U_{n-1}' / dz)
+        # U_n'(z) = ((n+1) * U_n(z) - z * U_n'(z) - U_{n-1}(z)) / (1 - z^2)  [complicated]
+        # Simpler: use recurrence T_n'' = (n^2 - 1) * n / (n^2 - 1) * ...
+        # Actually: T_n''(z) = n * ((n+1)*T_{n}(z) - U_n(z)) / (z^2 - 1) for |z| != 1
+
+        # Cleaner approach using the identity:
+        # T_n''(z) = n * (n * T_n(z) - z * T_n'(z)) / (z^2 - 1)
+        # But this has singularities at z = ±1
+
+        # Better: use explicit formula
+        # T_n''(z) = n * sum_{k=0}^{n-2} (n-k) * U_k(z) * [parity check]
+        #
+        # Simplest: recursive differentiation of U polynomials
+        # U_n'(z) = ((n+1)*U_{n-1}(z) - z*U_n(z)) / (z^2 - 1) ... also has singularities
+
+        # Most robust: use Chebyshev series differentiation
+        # For second derivative, compute U polynomials and their derivatives
+
+        # U_0' = 0, U_1' = 2, U_n' = 2*U_{n-1} + U_{n-2}' (from product rule on recurrence)
+        # Actually: d/dz[U_n] follows: U_0' = 0, U_1' = 2
+        # General: U_n'(z) = (n+1) * W_n(z) where W is another Chebyshev-like polynomial
+
+        # Let's use a simpler numerical approach for second derivatives
+        # T_n''(z) can be computed from the recurrence of T_n'
+        # If T_n' = n * U_{n-1}, then T_n'' = n * U_{n-1}'
+        # U_{n-1}' at degree n-1: we need derivative of second kind polynomials
+
+        # For U polynomials: U_n'(z) satisfies a recurrence too
+        # U_0' = 0, U_1' = 2
+        # U_n'(z) = 2*U_{n-1}(z) + 2*z*U_{n-1}'(z) - U_{n-2}'(z)
+
+        deriv2_basis = [jnp.zeros_like(x_scaled)]  # T_0'' = 0
+
+        if degree >= 1:
+            deriv2_basis.append(jnp.zeros_like(x_scaled))  # T_1'' = 0
+
+        if degree >= 2:
+            # Compute U polynomials
+            U = [jnp.ones_like(x_scaled), 2.0 * x_scaled]
+            for n in range(2, degree):
+                U_next = 2.0 * x_scaled * U[-1] - U[-2]
+                U.append(U_next)
+
+            # Compute U' polynomials using recurrence
+            # U_0' = 0, U_1' = 2
+            # U_n' = 2*U_{n-1} + 2*z*U_{n-1}' - U_{n-2}'
+            U_prime = [jnp.zeros_like(x_scaled), 2.0 * jnp.ones_like(x_scaled)]
+            for n in range(2, degree):
+                U_prime_next = 2.0 * U[n-1] + 2.0 * x_scaled * U_prime[-1] - U_prime[-2]
+                U_prime.append(U_prime_next)
+
+            # T_n'' = n * U_{n-1}'
+            for n in range(2, degree + 1):
+                deriv2_basis.append(n * U_prime[n - 1])
+
+        result = jnp.stack(deriv2_basis, axis=-1) * scale_factor[:, :, None]
+
+    else:
+        raise NotImplementedError(f"derivative_order={derivative_order} not implemented. Use 0, 1, or 2.")
+
+    # Restore original shape if input was 1D
+    if len(x_orig_shape) == 1:
+        result = result[:, 0, :]  # (n_points, 1, degree+1) -> (n_points, degree+1)
+
+    return result
+
+
 # Generated by Gemini
 def chebyshev_interpolate_jax(x, a, b, weights, num_grid_intervals, rounding_eps=1e-5, clip_end=False):
     """
