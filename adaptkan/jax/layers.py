@@ -83,8 +83,8 @@ class AdaptKANLayerJax(eqx.Module):
                  stretch_threshold=None, # Used alongside the "relative" stretch mode
                  exact_refit=False, # turn this on for slightly more accurate results in some scenarios. However exact_refit=False is faster for larger models
                  basis_type="bspline", # Adding in chebyshev basis functions
-                 constraints=None, # Constraints for Chebyshev basis: dict {(i,j): [(x, y, d), ...]} or list [(x, d), ...] for shared x,d across activations
-                 constraint_values=None, # If constraints is a list, this provides y values: shape (out_dim, in_dim, N)
+                 constraints=None, # Constraints for Chebyshev basis: dict {j: [(x, d), ...]} for input dim j across entire column of activations with N_j constraints
+                 constraint_values=None, # target values per each input dim j; mapping j -> array of shape (out_dim, N_j)
                  key=None):
         
         if key is None:
@@ -111,46 +111,51 @@ class AdaptKANLayerJax(eqx.Module):
         self.basis_type = basis_type
         
         default_dtype = jnp.array(0.).dtype
+        
+        # Initialize domain bounds
+        a = jnp.full((in_dim,), float(initialization_range[0]), dtype=default_dtype)
+        b = jnp.full((in_dim,), float(initialization_range[1]), dtype=default_dtype)
 
-        # Process constraints and potentially expand domain
-        # constraints format: list of (x, d) tuples specifying constraint locations and derivative orders
-        # constraint_values: array of shape (out_dim, in_dim, N) with target y values
-        if constraints is not None and basis_type == "chebyshev":
+        # Handle constraints if provided (only for Chebyshev basis)
+        if constraints is not None and constraint_values is not None and basis_type == "chebyshev":
             self.has_constraints = True
-
-            # Extract x values and derivative orders from constraints
-            constraint_x_values = [c[0] for c in constraints]
-            constraint_d_values = [c[1] for c in constraints]
-
-            # Store min/max x for domain protection during adaptation
-            self.constraint_x_min = float(min(constraint_x_values))
-            self.constraint_x_max = float(max(constraint_x_values))
-
-            # Expand initialization_range to include constraint x values
-            expanded_a = min(initialization_range[0], self.constraint_x_min)
-            expanded_b = max(initialization_range[1], self.constraint_x_max)
-
-            a = jnp.full((in_dim,), float(expanded_a), dtype=default_dtype)
-            b = jnp.full((in_dim,), float(expanded_b), dtype=default_dtype)
-
-            # Build constraint matrix C using expanded domain
-            # We use a[0], b[0] since all input dimensions share the same domain initially
-            full_constraints = [(x, 0.0, d) for x, d in constraints]  # y=0 placeholder
-            C, _ = build_constraint_matrix(full_constraints, float(a[0]), float(b[0]), k)
-            self.constraint_C = C
-
-            # Compute projection operator P
-            self.constraint_P = compute_constraint_projection_operator(C)
-
-            # Store constraint target values
-            if constraint_values is not None:
-                self.constraint_y = jnp.asarray(constraint_values)
+            C_list = []
+            
+            if isinstance(constraints, dict):
+                layer_mask = jnp.array(list(constraints.keys()))
+                layer_input_constraints = jnp.array(list(constraints.values()))
+                layer_output_constraints = jnp.array(list(constraint_values.values()))
             else:
-                # Default to zeros if not provided
-                self.constraint_y = jnp.zeros((out_dim, in_dim, len(constraints)), dtype=default_dtype)
+                layer_mask = jnp.arange(in_dim)
+                layer_input_constraints = jnp.array([constraints] * in_dim)
+                layer_output_constraints = jnp.array([constraint_values] * in_dim)
 
-            # Update initialization_range for later reference
-            initialization_range = [expanded_a, expanded_b]
+            for j in layer_mask:
+                input_constraints = layer_input_constraints[j]
+                output_constraints = layer_output_constraints[j]
+                position_constraints = input_constraints[input_constraints[:,1] == 0]
+                constraints_max, constraints_min = position_constraints.max(), position_constraints.min()
+                a = a.at[j].set(min(initialization_range[0], float(constraints_min)))
+                b = b.at[j].set(max(initialization_range[1], float(constraints_max)))
+
+                constraint_C = jnp.zeros((out_dim, len(input_constraints), k + 1), dtype=default_dtype)
+                constraint_P = jnp.zeros((out_dim, k + 1, len(input_constraints)), dtype=default_dtype)
+                constraint_y = jnp.zeros((out_dim, len(input_constraints)), dtype=default_dtype)
+                for i, output_row in enumerate(output_constraints):
+                    x, d = input_constraints[i]
+                    full_constraints = [(x, y, d) for y in output_row]  # y=0 placeholder
+                    # These matrices are n_constraints x (k + 1)
+                    C, _ = build_constraint_matrix(full_constraints, float(a[j]), float(b[j]), k)
+                    constraint_C = constraint_C.at[i].set(C)
+
+                    # Compute projection operator P
+                    P = compute_constraint_projection_operator(C)
+                    constraint_P = constraint_P.at[i].set(P)
+                    
+                    # Store constraint target values
+                    constraint_y = constraint_y.at[i].set(output_row)
+
+                # What to do here?
         else:
             self.has_constraints = False
             self.constraint_C = None
@@ -158,9 +163,6 @@ class AdaptKANLayerJax(eqx.Module):
             self.constraint_y = None
             self.constraint_x_min = None
             self.constraint_x_max = None
-
-            a = jnp.full((in_dim,), float(initialization_range[0]), dtype=default_dtype)
-            b = jnp.full((in_dim,), float(initialization_range[1]), dtype=default_dtype)
 
         # Initialize the weights
         self.weights = self.initialize_weights(in_dim, out_dim, num_grid_intervals, k, activation_noise, activation_strategy, key, a, b, basis_type)
@@ -181,10 +183,10 @@ class AdaptKANLayerJax(eqx.Module):
             self.base_fun = base_fun
         
         # Initialize the buffers
-        self.a = eqx.nn.StateIndex(jnp.full((in_dim,), float(initialization_range[0]), dtype=default_dtype))
-        self.b = eqx.nn.StateIndex(jnp.full((in_dim,), float(initialization_range[1]), dtype=default_dtype))
-        self.ood_a = eqx.nn.StateIndex(jnp.full((in_dim,), float(initialization_range[0]), dtype=default_dtype))
-        self.ood_b = eqx.nn.StateIndex(jnp.full((in_dim,), float(initialization_range[1]), dtype=default_dtype))
+        self.a = eqx.nn.StateIndex(a)
+        self.b = eqx.nn.StateIndex(b)
+        self.ood_a = eqx.nn.StateIndex(a)
+        self.ood_b = eqx.nn.StateIndex(b)
         self.data_counts = eqx.nn.StateIndex(jnp.zeros((in_dim, num_grid_intervals), dtype=default_dtype))
         self.ood_data_counts = eqx.nn.StateIndex(jnp.zeros((in_dim, 2), dtype=default_dtype))
         self.counts_nonempty = eqx.nn.StateIndex(False)

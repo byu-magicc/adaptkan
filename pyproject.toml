@@ -96,6 +96,7 @@ dependencies = [
     # Note: nvidia-* packages are often implicitly installed by jax/pytorch with CUDA
     "plotly",
     "pyqt5>=5.15.11",
+    "pytest>=9.0.2",
 ]
 
 [project.optional-dependencies]

@@ -91,6 +91,7 @@ Requires-Dist: pykan
 Requires-Dist: jupyter
 Requires-Dist: plotly
 Requires-Dist: pyqt5>=5.15.11
+Requires-Dist: pytest>=9.0.2
 Provides-Extra: cuda
 Requires-Dist: libmr==0.1.9; extra == "cuda"
 Requires-Dist: jax[cuda12_pip]==0.4.38; extra == "cuda"

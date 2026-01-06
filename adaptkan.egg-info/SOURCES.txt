@@ -6,3 +6,5 @@ adaptkan.egg-info/SOURCES.txt
 adaptkan.egg-info/dependency_links.txt
 adaptkan.egg-info/requires.txt
 adaptkan.egg-info/top_level.txt
+tests/test_chebyshev_adaptation.py
+tests/test_chebyshev_constraints.py

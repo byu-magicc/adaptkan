@@ -82,6 +82,7 @@ pykan
 jupyter
 plotly
 pyqt5>=5.15.11
+pytest>=9.0.2
 
 [cpu]
 jax[cpu]==0.4.38
