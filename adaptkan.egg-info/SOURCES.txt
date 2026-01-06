@@ -8,3 +8,4 @@ adaptkan.egg-info/requires.txt
 adaptkan.egg-info/top_level.txt
 tests/test_chebyshev_adaptation.py
 tests/test_chebyshev_constraints.py
+tests/test_layer_constraint_init.py
