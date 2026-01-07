@@ -106,14 +106,17 @@ def plot_layer_from_weights(
     If constraints are provided, point constraints (d=0) are shown as red dots,
     and derivative constraints (d=1) are shown as short tangent lines.
     """
-        
+
     # Pull out weights & counts
     domains = parallel_linspace_jax(layer_a, layer_b, domain_input_size+1)
 
+    # Use projected weights for plotting if available (to show constrained curve)
+    weights_to_plot = projected_weights if projected_weights is not None else layer_weights
+
     if basis_type == "bspline":
-        preds, _, _ = spline_interpolate_jax(domains.T, layer_a, layer_b, layer_weights, layer_k, layer_rounding_precision_eps)
+        preds, _, _ = spline_interpolate_jax(domains.T, layer_a, layer_b, weights_to_plot, layer_k, layer_rounding_precision_eps)
     elif basis_type == "chebyshev":
-        preds, _, _ = chebyshev_interpolate_jax(domains.T, layer_a, layer_b, layer_weights, layer_num_grid_intervals, layer_rounding_precision_eps)
+        preds, _, _ = chebyshev_interpolate_jax(domains.T, layer_a, layer_b, weights_to_plot, layer_num_grid_intervals, layer_rounding_precision_eps)
     else:
         raise NotImplementedError("Only B-spline and Chebyshev basis are currently supported in plotting.")
     
