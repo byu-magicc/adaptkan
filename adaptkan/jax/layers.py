@@ -12,6 +12,7 @@ from adaptkan.jax.utils import (compute_marginal_log_likelihood,
                                 coefs_from_curve_jax,
                                 build_constraint_matrix,
                                 compute_constraint_projection_operator,
+                                compute_chebyshev_derivative_basis,
                                 project_weights)
 from adaptkan.jax.constants import (M1, M2, M3, M4, M5)
 
@@ -344,8 +345,14 @@ class AdaptKANLayerJax(eqx.Module):
         adapted = pruned | stretched
 
         # Recompute constraint matrices if domain changed and constraints exist
-        if self.has_constraints and adapted:
-            state = model._recompute_constraint_matrices(state, updated_a, updated_b)
+        # Use jax.lax.cond to make this JIT-compatible
+        if self.has_constraints:
+            state = jax.lax.cond(
+                adapted,
+                lambda s: model._recompute_constraint_matrices(s, updated_a, updated_b),
+                lambda s: s,
+                state
+            )
 
         return model, state, adapted
     
@@ -461,6 +468,8 @@ class AdaptKANLayerJax(eqx.Module):
         The constraint matrices depend on the domain [a, b] because Chebyshev
         basis functions are evaluated after mapping x to the reference domain [-1, 1].
 
+        This version is JIT-compatible using vmap instead of Python loops.
+
         Args:
             state: Current state
             new_a: New lower bounds (in_dim,)
@@ -473,27 +482,42 @@ class AdaptKANLayerJax(eqx.Module):
             return state
 
         constraints_in = state.get(self.constraints_in)  # (in_dim, n_constraints, 2)
-        n_constraints = constraints_in.shape[1]
 
-        # Build C and P for all input dimensions with new domain bounds
-        C_list = []
-        P_list = []
-        for j in range(self.in_dim):
-            col_constraints = constraints_in[j]  # (n_constraints, 2)
-            col_a = new_a[j]
-            col_b = new_b[j]
+        # JIT-compatible version using vmap
+        def build_C_P_for_dim(col_constraints, col_a, col_b):
+            """Build C and P matrices for a single input dimension."""
+            # col_constraints: (n_constraints, 2) - each row is (x, d)
+            x_vals = col_constraints[:, 0]  # (n_constraints,)
+            d_vals = col_constraints[:, 1].astype(jnp.int32)  # (n_constraints,)
 
-            # Build list of (x, y_placeholder, d) tuples for build_constraint_matrix
-            constraint_list = [(float(col_constraints[i, 0]), 0.0, int(col_constraints[i, 1]))
-                               for i in range(n_constraints)]
+            # Build C matrix row by row using vmap
+            def build_row(x_val, d_val):
+                """Build one row of C matrix for constraint at x with derivative order d."""
+                x_arr = jnp.array([[x_val]])  # (1, 1)
 
-            C_j, _ = build_constraint_matrix(constraint_list, float(col_a), float(col_b), self.k)
-            P_j = compute_constraint_projection_operator(C_j)
-            C_list.append(C_j)
-            P_list.append(P_j)
+                # Use lax.switch to handle different derivative orders (0, 1, 2, ...)
+                # For simplicity, support up to derivative order 2
+                def deriv_0(_):
+                    return compute_chebyshev_derivative_basis(x_arr, col_a, col_b, self.k, derivative_order=0)[0, 0, :]
 
-        constraints_C_arr = jnp.stack(C_list, axis=0)  # (in_dim, n_constraints, k+1)
-        constraints_P_arr = jnp.stack(P_list, axis=0)  # (in_dim, k+1, n_constraints)
+                def deriv_1(_):
+                    return compute_chebyshev_derivative_basis(x_arr, col_a, col_b, self.k, derivative_order=1)[0, 0, :]
+
+                def deriv_2(_):
+                    return compute_chebyshev_derivative_basis(x_arr, col_a, col_b, self.k, derivative_order=2)[0, 0, :]
+
+                # Default to deriv_0 for any other value
+                row = jax.lax.switch(d_val, [deriv_0, deriv_1, deriv_2], None)
+                return row
+
+            C_j = jax.vmap(build_row)(x_vals, d_vals)  # (n_constraints, k+1)
+            P_j = compute_constraint_projection_operator(C_j)  # (k+1, n_constraints)
+            return C_j, P_j
+
+        # vmap over input dimensions
+        constraints_C_arr, constraints_P_arr = jax.vmap(build_C_P_for_dim)(
+            constraints_in, new_a, new_b
+        )  # (in_dim, n_constraints, k+1), (in_dim, k+1, n_constraints)
 
         state = state.set(self.constraints_C, constraints_C_arr)
         state = state.set(self.constraints_P, constraints_P_arr)
