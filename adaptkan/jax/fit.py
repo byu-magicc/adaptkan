@@ -362,13 +362,26 @@ def fit(
         # Collect frames (no plotting here)
         if snapshot_every is not None and epoch % snapshot_every == 0:
             # Store layer params for deferred rendering
-            # For constrained layers, use projected weights instead of raw weights
+            # For constrained layers, also store constraint info for visualization
             for idx, layer in enumerate(model.layers):
                 if layer.has_constraints:
-                    weights = layer.get_projected_weights(state)
+                    projected_weights = layer.get_projected_weights(state)
+                    constraints_in = state.get(layer.constraints_in)
+                    constraints_y = state.get(layer.constraints_y)
                 else:
-                    weights = layer.weights
-                item = weights, state.get(layer.a), state.get(layer.b), state.get(layer.data_counts), state.get(layer.ood_data_counts)
+                    projected_weights = None
+                    constraints_in = None
+                    constraints_y = None
+                item = (
+                    layer.weights,
+                    state.get(layer.a),
+                    state.get(layer.b),
+                    state.get(layer.data_counts),
+                    state.get(layer.ood_data_counts),
+                    projected_weights,
+                    constraints_in,
+                    constraints_y,
+                )
                 frames_per_layer[idx].append(item)
 
     # Post‑train: render animations if requested
@@ -376,7 +389,7 @@ def fit(
         os.makedirs(os.path.join(save_path, save_name), exist_ok=True)
         # Convert raw frames to visuals in one go
         for layer_idx, raw_frames in enumerate(frames_per_layer):
-            
+
             # This assumes that these parameters don't change
             num_grid_intervals = model.layers[layer_idx].num_grid_intervals
             k = model.layers[layer_idx].k
@@ -384,17 +397,22 @@ def fit(
             basis_type = model.layers[layer_idx].basis_type
 
             images = [
-                plot_layer_from_weights(weights,
-                                        a,
-                                        b,
-                                        num_grid_intervals,
-                                        data_counts,
-                                        ood_data_counts,
-                                        layer_idx,
-                                        k,
-                                        rounding_precision_eps,
-                                        basis_type=basis_type)
-                for weights, a, b, data_counts, ood_data_counts in raw_frames
+                plot_layer_from_weights(
+                    weights,
+                    a,
+                    b,
+                    num_grid_intervals,
+                    data_counts,
+                    ood_data_counts,
+                    layer_idx,
+                    k,
+                    rounding_precision_eps,
+                    basis_type=basis_type,
+                    projected_weights=projected_weights,
+                    constraints_in=constraints_in,
+                    constraints_y=constraints_y,
+                )
+                for weights, a, b, data_counts, ood_data_counts, projected_weights, constraints_in, constraints_y in raw_frames
             ]
 
             processed_images = resize_images_to_common_size(images, method='pad')
