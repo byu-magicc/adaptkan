@@ -361,10 +361,15 @@ def fit(
 
         # Collect frames (no plotting here)
         if snapshot_every is not None and epoch % snapshot_every == 0:
-            # just store raw layer params for deferred rendering
+            # Store layer params for deferred rendering
+            # For constrained layers, use projected weights instead of raw weights
             for idx, layer in enumerate(model.layers):
-                item = layer.weights, state.get(layer.a), state.get(layer.b), state.get(layer.data_counts), state.get(layer.ood_data_counts)
-                frames_per_layer[idx].append(item)  # simple example
+                if layer.has_constraints:
+                    weights = layer.get_projected_weights(state)
+                else:
+                    weights = layer.weights
+                item = weights, state.get(layer.a), state.get(layer.b), state.get(layer.data_counts), state.get(layer.ood_data_counts)
+                frames_per_layer[idx].append(item)
 
     # Post‑train: render animations if requested
     if snapshot_every is not None:
