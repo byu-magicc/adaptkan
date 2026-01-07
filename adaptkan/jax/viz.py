@@ -6,11 +6,13 @@ import imageio
 import io
 import numpy as np
 from PIL import Image
+import jax.numpy as jnp
 
 from adaptkan.jax.utils import (
     chebyshev_interpolate_jax,
     spline_interpolate_jax,
-    parallel_linspace_jax)
+    parallel_linspace_jax,
+    compute_chebyshev_basis)
 
 def plot_layer(
     model,
@@ -21,7 +23,9 @@ def plot_layer(
     domain_input_size=100,
     title=None,
     dpi=100,
-    ood_bin_width_ratio=0.75  # NEW: allow customizing OOD bin thickness
+    ood_bin_width_ratio=0.75,  # allow customizing OOD bin thickness
+    show_constraints=True,  # whether to show constraint markers
+    tangent_length=0.15  # length of derivative tangent lines (as fraction of domain)
 ):
     if title is None:
         title = f"Layer {layer_index+1}"
@@ -32,6 +36,16 @@ def plot_layer(
     ood_data_counts = state.get(layer.ood_data_counts)
     num_grid_intervals = layer.num_grid_intervals
     data_counts = state.get(layer.data_counts)
+
+    # Extract constraint info if present
+    constraints_in = None
+    constraints_y = None
+    projected_weights = None
+    if show_constraints and layer.has_constraints:
+        constraints_in = state.get(layer.constraints_in)  # (in_dim, n_constraints, 2)
+        constraints_y = state.get(layer.constraints_y)    # (out_dim, in_dim, n_constraints)
+        projected_weights = layer.get_projected_weights(state)
+
     img = plot_layer_from_weights(
         layer_weights,
         layer_a,
@@ -47,10 +61,14 @@ def plot_layer(
         fontsize=fontsize,
         domain_input_size=domain_input_size,
         title=title,
-        dpi=dpi,  # NEW: pass dpi through
-        ood_bin_width_ratio=ood_bin_width_ratio  # NEW: pass this through too
+        dpi=dpi,
+        ood_bin_width_ratio=ood_bin_width_ratio,
+        constraints_in=constraints_in,
+        constraints_y=constraints_y,
+        projected_weights=projected_weights,
+        tangent_length=tangent_length
     )
-    # -------- NEW: wrap the RGBA array in a live figure --------
+    # -------- wrap the RGBA array in a live figure --------
     h_px, w_px = img.shape[:2]
     fig = plt.figure(figsize=(w_px / dpi, h_px / dpi), dpi=dpi)
     ax = fig.add_axes([0, 0, 1, 1])  # fill entire canvas
@@ -75,11 +93,18 @@ def plot_layer_from_weights(
     domain_input_size=100,
     title=None,
     ood_bin_width_ratio=0.75,
-    dpi=100  # NEW: add dpi parameter
+    dpi=100,
+    constraints_in=None,  # (in_dim, n_constraints, 2) - the (x, d) pairs
+    constraints_y=None,   # (out_dim, in_dim, n_constraints) - target values
+    projected_weights=None,  # (out_dim, in_dim, k+1) - weights after projection
+    tangent_length=0.15  # length of derivative tangent lines (as fraction of domain)
 ):
     """
     Plot one layer of activations plus a histogram row at the bottom.
     The layout is fixed so that each cell has square_size inches in each dimension.
+
+    If constraints are provided, point constraints (d=0) are shown as red dots,
+    and derivative constraints (d=1) are shown as short tangent lines.
     """
         
     # Pull out weights & counts
@@ -171,8 +196,61 @@ def plot_layer_from_weights(
                 ax.set_title(f'$\\phi^{{{layer_index+1}}}_{{\\cdot,{col_idx}}}$', fontsize=fontsize*2)
 
             ax.plot(x, y, color='green')
-            
-            # NEW: Set x-axis limits based on the actual domain (gray bins) plus fixed padding
+
+            # Plot constraint markers if constraints are provided
+            if constraints_in is not None and constraints_y is not None and projected_weights is not None:
+                # Get constraints for this input dimension (col_idx)
+                col_constraints = constraints_in[col_idx]  # (n_constraints, 2)
+                col_targets = constraints_y[row_idx, col_idx]  # (n_constraints,)
+                weights_ij = projected_weights[row_idx, col_idx]  # (k+1,)
+
+                domain_width = float(layer_b[col_idx] - layer_a[col_idx])
+                half_tangent = tangent_length * domain_width / 2
+
+                for c_idx in range(col_constraints.shape[0]):
+                    x_c = float(col_constraints[c_idx, 0])
+                    d_c = int(col_constraints[c_idx, 1])
+                    y_target = float(col_targets[c_idx])
+
+                    if d_c == 0:
+                        # Point constraint: evaluate the function at x_c
+                        x_eval = jnp.array([[x_c]])
+                        basis_eval = compute_chebyshev_basis(
+                            x_eval,
+                            jnp.array([layer_a[col_idx]]),
+                            jnp.array([layer_b[col_idx]]),
+                            layer_k
+                        )[0, 0, :]  # (k+1,)
+                        y_eval = float(jnp.dot(basis_eval, weights_ij))
+                        ax.scatter([x_c], [y_eval], color='red', s=30, zorder=5, marker='o')
+
+                    elif d_c == 1:
+                        # Derivative constraint: plot tangent line
+                        # First get the function value at x_c
+                        x_eval = jnp.array([[x_c]])
+                        basis_eval = compute_chebyshev_basis(
+                            x_eval,
+                            jnp.array([layer_a[col_idx]]),
+                            jnp.array([layer_b[col_idx]]),
+                            layer_k
+                        )[0, 0, :]
+                        y_at_x = float(jnp.dot(basis_eval, weights_ij))
+
+                        # The slope is the target derivative value
+                        slope = y_target
+
+                        # Draw tangent line segment
+                        x_start = x_c - half_tangent
+                        x_end = x_c + half_tangent
+                        y_start = y_at_x - slope * half_tangent
+                        y_end = y_at_x + slope * half_tangent
+
+                        ax.plot([x_start, x_end], [y_start, y_end],
+                                color='orange', linewidth=2, zorder=4)
+                        # Add a small marker at the constraint point
+                        ax.scatter([x_c], [y_at_x], color='orange', s=20, zorder=5, marker='s')
+
+            # Set x-axis limits based on the actual domain (gray bins) plus fixed padding
             bin_edges = bin_count_edges[col_idx]
             bin_width = bin_count_widths[col_idx][0]
             padding = bin_width * ood_bin_width_ratio  # Fixed padding amount
