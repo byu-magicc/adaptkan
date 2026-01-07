@@ -766,5 +766,151 @@ class TestUtilityFunctions:
         assert jnp.allclose(Cw, y_vec, atol=1e-6)
 
 
+# =============================================================================
+# Test: Constraint recomputation during adaptation
+# =============================================================================
+
+class TestConstraintRecomputationDuringAdaptation:
+    """Tests for constraint matrix recomputation when domain changes."""
+
+    def test_constraints_recomputed_after_adapt(self, key):
+        """Constraint matrices should be recomputed when domain changes."""
+        out_dim, in_dim, k = 2, 2, 5
+
+        # Constraints at positions 0.0 and 1.0
+        constraints_in = jnp.array([
+            [0.0, 0],  # f(0) = target
+            [1.0, 0],  # f(1) = target
+        ])
+        constraints_y = jnp.zeros((out_dim, in_dim, 2))
+
+        layer, state = eqx.nn.make_with_state(AdaptKANLayerJax)(
+            in_dim=in_dim,
+            out_dim=out_dim,
+            k=k,
+            basis_type="chebyshev",
+            initialization_range=[0.0, 1.0],
+            constraints_in=constraints_in,
+            constraints_y=constraints_y,
+            prune_patience=1,
+            key=key,
+        )
+
+        # Store original constraint matrices
+        C_original = state.get(layer.constraints_C).copy()
+
+        # Simulate out-of-domain data to trigger stretch
+        # Layer __call__ with update=True automatically updates counts
+        x_ood = jax.random.uniform(key, (100, in_dim), minval=-2.0, maxval=3.0)
+        _, state, *_ = layer(x_ood, state, update=True)
+
+        # Run adaptation (should stretch domain and recompute C and P)
+        layer, state, adapted = layer.adapt(state)
+
+        if adapted:
+            # Get new constraint matrices
+            C_new = state.get(layer.constraints_C)
+
+            # Domain should have changed
+            new_a = state.get(layer.a)
+            new_b = state.get(layer.b)
+
+            # At least one bound should have changed
+            domain_changed = jnp.any(new_a < 0.0) or jnp.any(new_b > 1.0)
+
+            if domain_changed:
+                # Verify constraints are still satisfied with new C
+                projected = layer.get_projected_weights(state)
+                Cw = jnp.einsum('jnk,ijk->ijn', C_new, projected)
+                y = state.get(layer.constraints_y)
+
+                assert jnp.allclose(Cw, y, atol=1e-5), "Constraints not satisfied after adaptation"
+
+    def test_constraints_satisfied_after_manual_adapt(self, key):
+        """Constraints should still be satisfied after manual_adapt."""
+        out_dim, in_dim, k = 2, 2, 5
+
+        constraints_in = jnp.array([
+            [0.0, 0],
+            [1.0, 0],
+        ])
+        constraints_y = jnp.zeros((out_dim, in_dim, 2))
+
+        layer, state = eqx.nn.make_with_state(AdaptKANLayerJax)(
+            in_dim=in_dim,
+            out_dim=out_dim,
+            k=k,
+            basis_type="chebyshev",
+            initialization_range=[0.0, 1.0],
+            constraints_in=constraints_in,
+            constraints_y=constraints_y,
+            key=key,
+        )
+
+        # Simulate OOD data
+        x_ood = jax.random.uniform(key, (100, in_dim), minval=-2.0, maxval=3.0)
+        _, state, *_ = layer(x_ood, state, update=True)
+
+        # Run manual_adapt
+        layer, state, adapted = layer.manual_adapt(state)
+
+        # Verify constraints are still satisfied
+        projected = layer.get_projected_weights(state)
+        C = state.get(layer.constraints_C)
+        y = state.get(layer.constraints_y)
+
+        Cw = jnp.einsum('jnk,ijk->ijn', C, projected)
+        assert jnp.allclose(Cw, y, atol=1e-5), "Constraints not satisfied after manual_adapt"
+
+    def test_domain_never_shrinks_past_constraints(self, key):
+        """Domain should never shrink past constraint points."""
+        out_dim, in_dim, k = 2, 2, 5
+
+        # Constraints at positions -0.5 and 1.5 (beyond initial domain)
+        constraints_in = jnp.array([
+            [-0.5, 0],
+            [1.5, 0],
+        ])
+        constraints_y = jnp.zeros((out_dim, in_dim, 2))
+
+        layer, state = eqx.nn.make_with_state(AdaptKANLayerJax)(
+            in_dim=in_dim,
+            out_dim=out_dim,
+            k=k,
+            basis_type="chebyshev",
+            initialization_range=[0.0, 1.0],  # Will be expanded to [-0.5, 1.5]
+            constraints_in=constraints_in,
+            constraints_y=constraints_y,
+            prune_patience=1,
+            key=key,
+        )
+
+        # Domain should already be expanded to include constraint points
+        a = state.get(layer.a)
+        b = state.get(layer.b)
+        assert jnp.all(a <= -0.5), f"Domain lower bound should be <= -0.5, got {a}"
+        assert jnp.all(b >= 1.5), f"Domain upper bound should be >= 1.5, got {b}"
+
+        # Train on data in narrow range [0.25, 0.75]
+        x_narrow = jax.random.uniform(key, (1000, in_dim), minval=0.25, maxval=0.75)
+        for _ in range(5):
+            _, state, *_ = layer(x_narrow, state, update=True)
+            layer, state, adapted = layer.adapt(state)
+
+        # After adaptation, domain should still include constraint points
+        a_final = state.get(layer.a)
+        b_final = state.get(layer.b)
+        assert jnp.all(a_final <= -0.5), f"Domain lower bound shrunk past constraint: {a_final}"
+        assert jnp.all(b_final >= 1.5), f"Domain upper bound shrunk past constraint: {b_final}"
+
+        # Verify constraints are still satisfied
+        projected = layer.get_projected_weights(state)
+        C = state.get(layer.constraints_C)
+        y = state.get(layer.constraints_y)
+
+        Cw = jnp.einsum('jnk,ijk->ijn', C, projected)
+        assert jnp.allclose(Cw, y, atol=1e-5), "Constraints not satisfied after shrinking"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
