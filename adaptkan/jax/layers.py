@@ -290,7 +290,11 @@ class AdaptKANLayerJax(eqx.Module):
     def get_deltas(self, state):
         return (state.get(self.b) - state.get(self.a)) / self.num_grid_intervals
     
-    def adapt(self, state):  
+    def adapt(self, state):
+
+        # Get constraint bounds if they exist
+        constraints_a = state.get(self.constraints_a) if self.has_constraints else None
+        constraints_b = state.get(self.constraints_b) if self.has_constraints else None
 
         # Prune the model if it is the right time to do so
         prune_out = shrink_weights_and_counts_jax(self.get_shrink_threshold(state),
@@ -304,10 +308,12 @@ class AdaptKANLayerJax(eqx.Module):
                                                 rounding_eps=self.rounding_precision_eps,
                                                 min_delta=self.min_delta,
                                                 exact_shrink=self.exact_refit,
-                                                basis_type=self.basis_type)
-    
+                                                basis_type=self.basis_type,
+                                                constraints_a=constraints_a,
+                                                constraints_b=constraints_b)
+
         updated_weights, updated_dist, updated_ood_counts, updated_a, updated_b, pruned = prune_out
-            
+
         stretch_out = stretch_weights_and_counts_jax(updated_weights,
                                                    updated_dist,
                                                    updated_ood_counts,
@@ -321,7 +327,9 @@ class AdaptKANLayerJax(eqx.Module):
                                                    stretch_mode=self.stretch_mode,
                                                    stretch_threshold=self.stretch_threshold,
                                                    exact_stretch=self.exact_refit,
-                                                   basis_type=self.basis_type)
+                                                   basis_type=self.basis_type,
+                                                   constraints_a=constraints_a,
+                                                   constraints_b=constraints_b)
         
         updated_weights, updated_dist, updated_ood_counts, updated_a, updated_b, stretched = stretch_out
 
