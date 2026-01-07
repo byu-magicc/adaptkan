@@ -290,7 +290,11 @@ class AdaptKANLayerJax(eqx.Module):
     def get_deltas(self, state):
         return (state.get(self.b) - state.get(self.a)) / self.num_grid_intervals
     
-    def adapt(self, state):  
+    def adapt(self, state):
+
+        # Get constraint bounds if they exist
+        constraints_a = state.get(self.constraints_a) if self.has_constraints else None
+        constraints_b = state.get(self.constraints_b) if self.has_constraints else None
 
         # Prune the model if it is the right time to do so
         prune_out = shrink_weights_and_counts_jax(self.get_shrink_threshold(state),
@@ -304,10 +308,12 @@ class AdaptKANLayerJax(eqx.Module):
                                                 rounding_eps=self.rounding_precision_eps,
                                                 min_delta=self.min_delta,
                                                 exact_shrink=self.exact_refit,
-                                                basis_type=self.basis_type)
-    
+                                                basis_type=self.basis_type,
+                                                constraints_a=constraints_a,
+                                                constraints_b=constraints_b)
+
         updated_weights, updated_dist, updated_ood_counts, updated_a, updated_b, pruned = prune_out
-            
+
         stretch_out = stretch_weights_and_counts_jax(updated_weights,
                                                    updated_dist,
                                                    updated_ood_counts,
@@ -321,7 +327,9 @@ class AdaptKANLayerJax(eqx.Module):
                                                    stretch_mode=self.stretch_mode,
                                                    stretch_threshold=self.stretch_threshold,
                                                    exact_stretch=self.exact_refit,
-                                                   basis_type=self.basis_type)
+                                                   basis_type=self.basis_type,
+                                                   constraints_a=constraints_a,
+                                                   constraints_b=constraints_b)
         
         updated_weights, updated_dist, updated_ood_counts, updated_a, updated_b, stretched = stretch_out
 
@@ -334,7 +342,11 @@ class AdaptKANLayerJax(eqx.Module):
         model = eqx.tree_at(lambda m: m.weights, self, updated_weights)
 
         adapted = pruned | stretched
-        
+
+        # Recompute constraint matrices if domain changed and constraints exist
+        if self.has_constraints and adapted:
+            state = model._recompute_constraint_matrices(state, updated_a, updated_b)
+
         return model, state, adapted
     
     def manual_adapt(self, state):
@@ -342,6 +354,13 @@ class AdaptKANLayerJax(eqx.Module):
 
         new_a = state.get(self.ood_a)
         new_b = state.get(self.ood_b)
+
+        # Clamp domain bounds to ensure constraint points are not excluded
+        if self.has_constraints:
+            constraints_a = state.get(self.constraints_a)
+            constraints_b = state.get(self.constraints_b)
+            new_a = jnp.minimum(new_a, constraints_a)
+            new_b = jnp.maximum(new_b, constraints_b)
 
         updated_weights, updated_counts, updated_ood_counts = refit_weights_and_counts_jax(
             self.weights,
@@ -363,11 +382,15 @@ class AdaptKANLayerJax(eqx.Module):
         state = state.set(self.b, new_b)
         state = state.set(self.data_counts, updated_counts)
         state = state.set(self.ood_data_counts, updated_ood_counts)
-        
+
         # Update the model with the new weights
         # Stop the gradient from flowing through
         model = eqx.tree_at(lambda m: m.weights, self, updated_weights)
-        
+
+        # Recompute constraint matrices if constraints exist
+        if self.has_constraints:
+            state = model._recompute_constraint_matrices(state, new_a, new_b)
+
         return model, state, jnp.array(True)
     
     def update_counts(self, last_indices, lower_ood_mask, upper_ood_mask, last_ood_a, last_ood_b, state, add_only=False):
@@ -429,6 +452,52 @@ class AdaptKANLayerJax(eqx.Module):
         state = state.set(self.ood_a, jnp.minimum(state.get(self.ood_a), last_ood_a).astype(dtype))
         state = state.set(self.ood_b, jnp.maximum(state.get(self.ood_b), last_ood_b).astype(dtype))
         
+        return state
+
+    def _recompute_constraint_matrices(self, state, new_a, new_b):
+        """
+        Recompute constraint matrices C and P when domain bounds change.
+
+        The constraint matrices depend on the domain [a, b] because Chebyshev
+        basis functions are evaluated after mapping x to the reference domain [-1, 1].
+
+        Args:
+            state: Current state
+            new_a: New lower bounds (in_dim,)
+            new_b: New upper bounds (in_dim,)
+
+        Returns:
+            Updated state with recomputed constraints_C and constraints_P
+        """
+        if not self.has_constraints:
+            return state
+
+        constraints_in = state.get(self.constraints_in)  # (in_dim, n_constraints, 2)
+        n_constraints = constraints_in.shape[1]
+
+        # Build C and P for all input dimensions with new domain bounds
+        C_list = []
+        P_list = []
+        for j in range(self.in_dim):
+            col_constraints = constraints_in[j]  # (n_constraints, 2)
+            col_a = new_a[j]
+            col_b = new_b[j]
+
+            # Build list of (x, y_placeholder, d) tuples for build_constraint_matrix
+            constraint_list = [(float(col_constraints[i, 0]), 0.0, int(col_constraints[i, 1]))
+                               for i in range(n_constraints)]
+
+            C_j, _ = build_constraint_matrix(constraint_list, float(col_a), float(col_b), self.k)
+            P_j = compute_constraint_projection_operator(C_j)
+            C_list.append(C_j)
+            P_list.append(P_j)
+
+        constraints_C_arr = jnp.stack(C_list, axis=0)  # (in_dim, n_constraints, k+1)
+        constraints_P_arr = jnp.stack(P_list, axis=0)  # (in_dim, k+1, n_constraints)
+
+        state = state.set(self.constraints_C, constraints_C_arr)
+        state = state.set(self.constraints_P, constraints_P_arr)
+
         return state
 
     def get_projected_weights(self, state):

@@ -872,10 +872,16 @@ def refit_weights_and_counts_jax(weights,
 
     return new_weights, new_counts, new_ood_counts
 
-def _stretch_weights_and_counts_jax(combined_mask, activation_weights, data_counts, ood_counts, a, b, ood_a, ood_b, k, num_grid_intervals, rounding_eps, exact_stretch, basis_type):
+def _stretch_weights_and_counts_jax(combined_mask, activation_weights, data_counts, ood_counts, a, b, ood_a, ood_b, k, num_grid_intervals, rounding_eps, exact_stretch, basis_type, constraints_a=None, constraints_b=None):
     # Determine the new domain boundaries
     new_a = jnp.where(combined_mask, ood_a, a) # TODO Replace combined_mask with a_mask and b_mask
     new_b = jnp.where(combined_mask, ood_b, b)
+
+    # Clamp domain bounds to ensure constraint points are not excluded
+    if constraints_a is not None:
+        new_a = jnp.minimum(new_a, constraints_a)
+    if constraints_b is not None:
+        new_b = jnp.maximum(new_b, constraints_b)
 
     new_weights, new_counts, new_ood_counts = refit_weights_and_counts_jax(
         activation_weights,
@@ -894,7 +900,7 @@ def _stretch_weights_and_counts_jax(combined_mask, activation_weights, data_coun
 
     return new_weights, new_counts, new_ood_counts, new_a, new_b
 
-def stretch_weights_and_counts_jax(activation_weights, data_counts, ood_counts, a, b, ood_a, ood_b, k, num_grid_intervals, rounding_eps, stretch_mode="max", stretch_threshold=None, exact_stretch=False, basis_type="bspline"):
+def stretch_weights_and_counts_jax(activation_weights, data_counts, ood_counts, a, b, ood_a, ood_b, k, num_grid_intervals, rounding_eps, stretch_mode="max", stretch_threshold=None, exact_stretch=False, basis_type="bspline", constraints_a=None, constraints_b=None):
 
     # Figure out if we need to stretch the weights or not
     if stretch_mode == "max":
@@ -925,7 +931,7 @@ def stretch_weights_and_counts_jax(activation_weights, data_counts, ood_counts, 
     # TODO Replace combined_mask with a_mask, b_mask
     updated_weights, updated_counts, updated_ood_counts, updated_a, updated_b = jax.lax.cond(
         stretch,
-        lambda: _stretch_weights_and_counts_jax(combined_mask, activation_weights, data_counts, ood_counts, a, b, ood_a, ood_b, k, num_grid_intervals, rounding_eps, exact_stretch, basis_type),
+        lambda: _stretch_weights_and_counts_jax(combined_mask, activation_weights, data_counts, ood_counts, a, b, ood_a, ood_b, k, num_grid_intervals, rounding_eps, exact_stretch, basis_type, constraints_a, constraints_b),
         lambda: (activation_weights, data_counts, ood_counts, a, b)
     )
 
@@ -944,7 +950,7 @@ def shrink_domain(data_counts, ood_counts, thresh):
     combined_mask = (lower_mask & lower_ood_mask) | (upper_mask & upper_ood_mask)
     return combined_mask
 
-def _shrink_weights_and_counts_jax(weights, data_counts, ood_counts, a, b, thresh, num_grid_intervals, min_delta, k, rounding_eps, exact_refit, basis_type):
+def _shrink_weights_and_counts_jax(weights, data_counts, ood_counts, a, b, thresh, num_grid_intervals, min_delta, k, rounding_eps, exact_refit, basis_type, constraints_a=None, constraints_b=None):
     # Create mask for counts above threshold
     # masked_weight_counts = jnp.where(combined_mask[:, None], weight_counts, -jnp.inf)
     above_thresh_mask = (data_counts > thresh).astype(float)
@@ -959,6 +965,12 @@ def _shrink_weights_and_counts_jax(weights, data_counts, ood_counts, a, b, thres
     domain = parallel_linspace_jax(a, b, num_grid_intervals + 1)
     new_a = domain[jnp.arange(first_ones.shape[0]), first_ones]
     new_b = domain[jnp.arange(last_ones.shape[0]), last_ones]
+
+    # Clamp domain bounds to ensure constraint points are not excluded
+    if constraints_a is not None:
+        new_a = jnp.minimum(new_a, constraints_a)
+    if constraints_b is not None:
+        new_b = jnp.maximum(new_b, constraints_b)
 
     # Enforce minimum delta
     min_delta_violated = ((new_b - new_a) / num_grid_intervals) < min_delta
@@ -981,7 +993,7 @@ def _shrink_weights_and_counts_jax(weights, data_counts, ood_counts, a, b, thres
 
     return new_weights, new_counts, new_ood_counts, new_a, new_b
 
-def shrink_weights_and_counts_jax(thresh, activation_weights, a, b, num_grid_intervals, data_counts, ood_counts, k, rounding_eps, min_delta=1e-4, exact_shrink=False, basis_type="spline"):
+def shrink_weights_and_counts_jax(thresh, activation_weights, a, b, num_grid_intervals, data_counts, ood_counts, k, rounding_eps, min_delta=1e-4, exact_shrink=False, basis_type="spline", constraints_a=None, constraints_b=None):
     combined_mask = shrink_domain(data_counts, ood_counts, thresh)
     needs_shrinking = jnp.any(combined_mask)
     counts_nonempty = jnp.any(data_counts > 0)
@@ -989,7 +1001,7 @@ def shrink_weights_and_counts_jax(thresh, activation_weights, a, b, num_grid_int
 
     new_weights, new_counts, new_ood_counts, new_a, new_b = jax.lax.cond(
         shrunk,
-        lambda: _shrink_weights_and_counts_jax(activation_weights, data_counts, ood_counts, a, b, thresh, num_grid_intervals, min_delta, k, rounding_eps, exact_shrink, basis_type),
+        lambda: _shrink_weights_and_counts_jax(activation_weights, data_counts, ood_counts, a, b, thresh, num_grid_intervals, min_delta, k, rounding_eps, exact_shrink, basis_type, constraints_a, constraints_b),
         lambda: (activation_weights, data_counts, ood_counts, a, b)
     )
 
