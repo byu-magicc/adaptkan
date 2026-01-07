@@ -372,10 +372,11 @@ def fit(
         # Convert raw frames to visuals in one go
         for layer_idx, raw_frames in enumerate(frames_per_layer):
             
-            # This assumes that these paramters don't change
+            # This assumes that these parameters don't change
             num_grid_intervals = model.layers[layer_idx].num_grid_intervals
             k = model.layers[layer_idx].k
             rounding_precision_eps = model.layers[layer_idx].rounding_precision_eps
+            basis_type = model.layers[layer_idx].basis_type
 
             images = [
                 plot_layer_from_weights(weights,
@@ -386,7 +387,8 @@ def fit(
                                         ood_data_counts,
                                         layer_idx,
                                         k,
-                                        rounding_precision_eps)
+                                        rounding_precision_eps,
+                                        basis_type=basis_type)
                 for weights, a, b, data_counts, ood_data_counts in raw_frames
             ]
 
