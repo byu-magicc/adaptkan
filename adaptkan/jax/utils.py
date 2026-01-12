@@ -252,13 +252,15 @@ def compute_constraint_projection_operator(C):
         ŵ = w - P @ (C @ w - y)
 
     Args:
-        C: Constraint matrix, shape (N, k+1)
+        C: Constraint matrix, shape (N, m) where m is the number of weight coefficients
+           For per-activation: m = k+1
+           For combined (sum-of-activations): m = in_dim * (k+1)
 
     Returns:
-        P: Projection operator, shape (k+1, N)
+        P: Projection operator, shape (m, N)
 
     Note:
-        - Requires N <= k (more coefficients than constraints) for null space to exist
+        - Requires N < m (more coefficients than constraints) for null space to exist
         - Uses pseudo-inverse for numerical stability
     """
     # C C^T has shape (N, N)
@@ -267,10 +269,48 @@ def compute_constraint_projection_operator(C):
     # Compute (C C^T)^{-1} using pseudo-inverse for stability
     CCT_inv = jnp.linalg.pinv(CCT)
 
-    # P = C^T @ (C C^T)^{-1}, shape (k+1, N)
+    # P = C^T @ (C C^T)^{-1}, shape (m, N)
     P = C.T @ CCT_inv
 
     return P
+
+
+def build_combined_constraint_matrix(z_c, a, b, k):
+    """
+    Build constraint matrix for sum-of-activations constraints (combined approach).
+
+    For a layer with in_dim inputs, each row of the layer output y_i at constraint
+    point x is:
+        y_i(x) = Σ_j w_{i,j}^T @ T_j(x_j)
+
+    where T_j(x_j) = [T_k(N_j(x_j)), ..., T_0(N_j(x_j))]^T are the Chebyshev basis
+    functions evaluated at the normalized input.
+
+    The combined weight vector for output i is:
+        w_{i,*} = [w_{i,1}^T, w_{i,2}^T, ..., w_{i,n}^T]^T
+
+    The constraint matrix C has shape (n_constraints, in_dim * (k+1)) where each
+    row p is:
+        C_p = [T_1(x^(p)_1)^T, T_2(x^(p)_2)^T, ..., T_n(x^(p)_n)^T]
+
+    Args:
+        z_c: Constraint input points, shape (n_constraints, in_dim)
+        a: Domain lower bounds, shape (in_dim,)
+        b: Domain upper bounds, shape (in_dim,)
+        k: Chebyshev polynomial degree
+
+    Returns:
+        C: Constraint matrix, shape (n_constraints, in_dim * (k+1))
+    """
+    # Compute Chebyshev basis at each constraint point
+    # basis shape: (n_constraints, in_dim, k+1)
+    basis = compute_chebyshev_basis(z_c, a, b, degree=k)
+
+    # Flatten to combined form: (n_constraints, in_dim * (k+1))
+    n_constraints = z_c.shape[0]
+    C = basis.reshape(n_constraints, -1)
+
+    return C
 
 
 def project_weights(weights, C, P, y_vec):

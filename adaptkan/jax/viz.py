@@ -37,13 +37,9 @@ def plot_layer(
     num_grid_intervals = layer.num_grid_intervals
     data_counts = state.get(layer.data_counts)
 
-    # Extract constraint info if present
-    constraints_in = None
-    constraints_y = None
+    # Get projected weights if constraints are present (for plotting constrained curves)
     projected_weights = None
     if show_constraints and layer.has_constraints:
-        constraints_in = state.get(layer.constraints_in)  # (in_dim, n_constraints, 2)
-        constraints_y = state.get(layer.constraints_y)    # (out_dim, in_dim, n_constraints)
         projected_weights = layer.get_projected_weights(state)
 
     img = plot_layer_from_weights(
@@ -63,8 +59,6 @@ def plot_layer(
         title=title,
         dpi=dpi,
         ood_bin_width_ratio=ood_bin_width_ratio,
-        constraints_in=constraints_in,
-        constraints_y=constraints_y,
         projected_weights=projected_weights,
         tangent_length=tangent_length
     )
@@ -94,17 +88,16 @@ def plot_layer_from_weights(
     title=None,
     ood_bin_width_ratio=0.75,
     dpi=100,
-    constraints_in=None,  # (in_dim, n_constraints, 2) - the (x, d) pairs
-    constraints_y=None,   # (out_dim, in_dim, n_constraints) - target values
-    projected_weights=None,  # (out_dim, in_dim, k+1) - weights after projection
-    tangent_length=0.15  # length of derivative tangent lines (as fraction of domain)
+    projected_weights=None,  # (out_dim, in_dim, k+1) - weights after projection (for constrained layers)
+    tangent_length=0.15  # unused, kept for API compatibility
 ):
     """
     Plot one layer of activations plus a histogram row at the bottom.
     The layout is fixed so that each cell has square_size inches in each dimension.
 
-    If constraints are provided, point constraints (d=0) are shown as red dots,
-    and derivative constraints (d=1) are shown as short tangent lines.
+    If projected_weights is provided, the constrained curves will be shown.
+    Note: Combined constraints apply to layer outputs (sum of activations), not individual
+    activation functions, so we only show the projected curves without per-activation markers.
     """
 
     # Pull out weights & counts
@@ -199,59 +192,6 @@ def plot_layer_from_weights(
                 ax.set_title(f'$\\phi^{{{layer_index+1}}}_{{\\cdot,{col_idx}}}$', fontsize=fontsize*2)
 
             ax.plot(x, y, color='green')
-
-            # Plot constraint markers if constraints are provided
-            if constraints_in is not None and constraints_y is not None and projected_weights is not None:
-                # Get constraints for this input dimension (col_idx)
-                col_constraints = constraints_in[col_idx]  # (n_constraints, 2)
-                col_targets = constraints_y[row_idx, col_idx]  # (n_constraints,)
-                weights_ij = projected_weights[row_idx, col_idx]  # (k+1,)
-
-                domain_width = float(layer_b[col_idx] - layer_a[col_idx])
-                half_tangent = tangent_length * domain_width / 2
-
-                for c_idx in range(col_constraints.shape[0]):
-                    x_c = float(col_constraints[c_idx, 0])
-                    d_c = int(col_constraints[c_idx, 1])
-                    y_target = float(col_targets[c_idx])
-
-                    if d_c == 0:
-                        # Point constraint: evaluate the function at x_c
-                        x_eval = jnp.array([[x_c]])
-                        basis_eval = compute_chebyshev_basis(
-                            x_eval,
-                            jnp.array([layer_a[col_idx]]),
-                            jnp.array([layer_b[col_idx]]),
-                            layer_k
-                        )[0, 0, :]  # (k+1,)
-                        y_eval = float(jnp.dot(basis_eval, weights_ij))
-                        ax.scatter([x_c], [y_eval], color='red', s=30, zorder=5, marker='o')
-
-                    elif d_c == 1:
-                        # Derivative constraint: plot tangent line
-                        # First get the function value at x_c
-                        x_eval = jnp.array([[x_c]])
-                        basis_eval = compute_chebyshev_basis(
-                            x_eval,
-                            jnp.array([layer_a[col_idx]]),
-                            jnp.array([layer_b[col_idx]]),
-                            layer_k
-                        )[0, 0, :]
-                        y_at_x = float(jnp.dot(basis_eval, weights_ij))
-
-                        # The slope is the target derivative value
-                        slope = y_target
-
-                        # Draw tangent line segment
-                        x_start = x_c - half_tangent
-                        x_end = x_c + half_tangent
-                        y_start = y_at_x - slope * half_tangent
-                        y_end = y_at_x + slope * half_tangent
-
-                        ax.plot([x_start, x_end], [y_start, y_end],
-                                color='orange', linewidth=2, zorder=4)
-                        # Add a small marker at the constraint point
-                        ax.scatter([x_c], [y_at_x], color='orange', s=20, zorder=5, marker='s')
 
             # Set x-axis limits based on the actual domain (gray bins) plus fixed padding
             bin_edges = bin_count_edges[col_idx]

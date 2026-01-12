@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import optax
 
 from adaptkan.jax.layers import AdaptKANLayerJax
-from adaptkan.jax.utils import copy_state, copy_state_subset
+from adaptkan.jax.utils import copy_state, copy_state_subset, build_combined_constraint_matrix, compute_constraint_projection_operator
 
 # Implement a custom vjp in the future if needed
 def _call_impl(model: 'AdaptKANJax', x: jnp.ndarray, state: eqx.nn.State, update=True, add_counts=False):
@@ -47,6 +47,11 @@ class AdaptKANJax(eqx.Module):
     min_delta: float
     k: int
 
+    # Network-wide constraints (applied to last layer)
+    has_network_constraints: bool = eqx.field(static=True)
+    network_constraints_in: jax.Array | None   # (n_constraints, network_in_dim) - stored as module attribute
+    network_constraints_out: jax.Array | None  # (n_constraints, network_out_dim) - stored as module attribute
+
     def __init__(self,
                  width=None,
                  activation_noise=0.1, # Need to pass this to other networks
@@ -64,8 +69,8 @@ class AdaptKANJax(eqx.Module):
                  prune_mode="default", # Either "default" or "relative". Default works well
                  exact_refit=True, # Turning this to false sacrifices accuracy but is faster
                  basis_type="bspline", # Either "bspline" or "chebyshev"
-                 constraints_in=None,  # Per-layer constraints: (n_layers, in_dim, n_constraints, 2) or broadcast (n_layers, n_constraints, 2)
-                 constraints_y=None,   # Per-layer targets: (n_layers, out_dim, in_dim, n_constraints) or broadcast (n_layers, out_dim, n_constraints)
+                 network_constraints_in=None,   # (n_constraints, network_in_dim) - network-wide constraints
+                 network_constraints_out=None,  # (n_constraints, network_out_dim) - target outputs
                  seed = 0):
 
         super(AdaptKANJax, self).__init__()
@@ -96,8 +101,21 @@ class AdaptKANJax(eqx.Module):
         keys = jax.random.split(key, depth)
         keys = [None for i in range(depth)]
 
-        # Process constraints for each layer
-        layer_constraints = self._process_constraints(constraints_in, constraints_y, width, depth)
+        # Handle network-wide constraints
+        if network_constraints_in is not None and network_constraints_out is not None and basis_type == "chebyshev":
+            self.has_network_constraints = True
+            self.network_constraints_in = jnp.asarray(network_constraints_in)
+            self.network_constraints_out = jnp.asarray(network_constraints_out)
+
+            n_constraints = self.network_constraints_in.shape[0]
+            assert self.network_constraints_in.shape == (n_constraints, width[0]), \
+                f"network_constraints_in must have shape (n_constraints, network_in_dim={width[0]})"
+            assert self.network_constraints_out.shape == (n_constraints, width[-1]), \
+                f"network_constraints_out must have shape (n_constraints, network_out_dim={width[-1]})"
+        else:
+            self.has_network_constraints = False
+            self.network_constraints_in = None
+            self.network_constraints_out = None
 
         self.layers = []
 
@@ -105,120 +123,153 @@ class AdaptKANJax(eqx.Module):
             in_dim = width[i]
             out_dim = width[i+1]
 
-            # Get constraints for this layer (or None)
-            layer_cons_in, layer_cons_y = layer_constraints[i]
-
-            layer = AdaptKANLayerJax(in_dim=in_dim,
-                                    out_dim=out_dim,
-                                    activation_noise=activation_noise,
-                                    activation_strategy=activation_strategy,
-                                    num_grid_intervals=grid_intervals_list[i],
-                                    initialization_range=initialization_range,
-                                    prune_patience=prune_patience,
-                                    ema_alpha=ema_alpha,
-                                    min_delta=min_delta,
-                                    stretch_threshold=stretch_threshold,
-                                    stretch_mode=stretch_mode,
-                                    prune_mode=prune_mode,
-                                    exact_refit=exact_refit,
-                                    rounding_precision_eps=rounding_precision_eps,
-                                    basis_type=basis_type,
-                                    k=k,
-                                    constraints_in=layer_cons_in,
-                                    constraints_y=layer_cons_y,
-                                    key=keys[i])
+            # For the last layer with network constraints, pass placeholder constraints
+            # that will be populated by _setup_network_constraints
+            is_last_layer = (i == depth - 1)
+            if is_last_layer and self.has_network_constraints:
+                # Create placeholder constraints for the last layer
+                # These will be overwritten by _setup_network_constraints
+                n_constraints = self.network_constraints_in.shape[0]
+                placeholder_in = jnp.zeros((n_constraints, in_dim))
+                placeholder_out = jnp.zeros((n_constraints, out_dim))
+                layer = AdaptKANLayerJax(in_dim=in_dim,
+                                        out_dim=out_dim,
+                                        activation_noise=activation_noise,
+                                        activation_strategy=activation_strategy,
+                                        num_grid_intervals=grid_intervals_list[i],
+                                        initialization_range=initialization_range,
+                                        prune_patience=prune_patience,
+                                        ema_alpha=ema_alpha,
+                                        min_delta=min_delta,
+                                        stretch_threshold=stretch_threshold,
+                                        stretch_mode=stretch_mode,
+                                        prune_mode=prune_mode,
+                                        exact_refit=exact_refit,
+                                        rounding_precision_eps=rounding_precision_eps,
+                                        basis_type=basis_type,
+                                        k=k,
+                                        constraints_in=placeholder_in,
+                                        constraints_out=placeholder_out,
+                                        key=keys[i])
+            else:
+                layer = AdaptKANLayerJax(in_dim=in_dim,
+                                        out_dim=out_dim,
+                                        activation_noise=activation_noise,
+                                        activation_strategy=activation_strategy,
+                                        num_grid_intervals=grid_intervals_list[i],
+                                        initialization_range=initialization_range,
+                                        prune_patience=prune_patience,
+                                        ema_alpha=ema_alpha,
+                                        min_delta=min_delta,
+                                        stretch_threshold=stretch_threshold,
+                                        stretch_mode=stretch_mode,
+                                        prune_mode=prune_mode,
+                                        exact_refit=exact_refit,
+                                        rounding_precision_eps=rounding_precision_eps,
+                                        basis_type=basis_type,
+                                        k=k,
+                                        key=keys[i])
             self.layers.append(layer)
 
-    def _process_constraints(self, constraints_in, constraints_y, width, depth):
+    def _setup_network_constraints(self, state):
         """
-        Process constraint inputs into per-layer format.
+        Setup network-wide constraints on the last layer.
+
+        Forwards network_constraints_in through all but the last layer to get z_c,
+        then sets up constraints on the last layer with z_c as input points.
 
         Args:
-            constraints_in: List of arrays (or None) for each layer.
-                - Each element: (n_constraints, 2) for broadcast, (in_dim, n_constraints, 2) for full, or None
-                - Example: [jnp.array([[0,0], [1,0]]), None, jnp.array([[0,0]])]
-            constraints_y: List of arrays (or None) for each layer.
-                - Each element: (out_dim, n_constraints) for broadcast, (out_dim, in_dim, n_constraints) for full, or None
-                - Example: [jnp.array([[0, 0]]), None, jnp.array([[0]])]
+            state: Current state
 
         Returns:
-            List of (layer_constraints_in, layer_constraints_y) tuples, with None for unconstrained layers.
+            Updated state with last layer constraints initialized
         """
-        # No constraints at all
-        if constraints_in is None and constraints_y is None:
-            return [(None, None) for _ in range(depth)]
+        if not self.has_network_constraints:
+            return state
 
-        # Must provide both or neither
-        assert constraints_in is not None and constraints_y is not None, \
-            "Must provide both constraints_in and constraints_y, or neither"
+        # Forward constraint inputs through all but last layer
+        z_c = self.network_constraints_in  # (n_constraints, network_in_dim)
+        for layer in self.layers[:-1]:
+            z_c, state, *_ = layer(z_c, state, update=False)
 
-        assert len(constraints_in) == depth, \
-            f"constraints_in list length must match depth ({depth}), got {len(constraints_in)}"
-        assert len(constraints_y) == depth, \
-            f"constraints_y list length must match depth ({depth}), got {len(constraints_y)}"
+        # z_c is now (n_constraints, last_layer_in_dim)
+        last_layer = self.layers[-1]
 
-        layer_constraints = []
-        for i in range(depth):
-            cons_in = constraints_in[i]
-            cons_y = constraints_y[i]
+        # Get current domain bounds of last layer
+        a = state.get(last_layer.a)
+        b = state.get(last_layer.b)
 
-            # Skip this layer if either is None
-            if cons_in is None or cons_y is None:
-                assert cons_in is None and cons_y is None, \
-                    f"Layer {i}: constraints_in and constraints_y must both be None or both be arrays"
-                layer_constraints.append((None, None))
-                continue
+        # Compute constraints_a and constraints_b for domain protection
+        cons_a = jnp.min(z_c, axis=0)  # (in_dim,)
+        cons_b = jnp.max(z_c, axis=0)  # (in_dim,)
 
-            in_dim = width[i]
-            out_dim = width[i + 1]
+        # Expand domain to include constraint points
+        new_a = jnp.minimum(a, cons_a)
+        new_b = jnp.maximum(b, cons_b)
+        state = state.set(last_layer.a, new_a)
+        state = state.set(last_layer.b, new_b)
 
-            layer_cons_in = jnp.asarray(cons_in)
-            layer_cons_y = jnp.asarray(cons_y)
+        # Build combined constraint matrix and projection operator
+        C = build_combined_constraint_matrix(z_c, new_a, new_b, last_layer.k)
+        P = compute_constraint_projection_operator(C)
 
-            layer_cons_in, layer_cons_y = self._broadcast_layer_constraints(
-                layer_cons_in, layer_cons_y, in_dim, out_dim, i
-            )
-            layer_constraints.append((layer_cons_in, layer_cons_y))
+        # Store in state
+        state = state.set(last_layer.constraints_in, z_c)
+        state = state.set(last_layer.constraints_out, self.network_constraints_out)
+        state = state.set(last_layer.constraints_C, C)
+        state = state.set(last_layer.constraints_P, P)
+        state = state.set(last_layer.constraints_a, cons_a)
+        state = state.set(last_layer.constraints_b, cons_b)
 
-        return layer_constraints
+        return state
 
-    def _broadcast_layer_constraints(self, layer_cons_in, layer_cons_y, in_dim, out_dim, layer_idx):
+    def _recompute_network_constraints(self, state):
         """
-        Broadcast constraints to full shape for a single layer.
+        Recompute last layer constraints after any layer adapts.
 
-        Input formats:
-        - layer_cons_in: (n_constraints, 2) for broadcast, or (in_dim, n_constraints, 2) for full
-        - layer_cons_y: (out_dim, n_constraints) for broadcast, or (out_dim, in_dim, n_constraints) for full
+        When intermediate layers adapt (domain changes), the mapping from
+        network inputs to last layer inputs changes. We must:
+        1. Forward network_constraints_in through layers[:-1] to get new z_c
+        2. Recompute constraints_C and constraints_P for the last layer
+        3. Update constraints_a and constraints_b for domain protection
 
-        Output formats:
-        - layer_cons_in: (in_dim, n_constraints, 2)
-        - layer_cons_y: (out_dim, in_dim, n_constraints)
+        Args:
+            state: Current state
+
+        Returns:
+            Updated state with recomputed last layer constraints
         """
-        # Handle broadcast format for constraints_in
-        # Broadcast: (n_constraints, 2) -> (in_dim, n_constraints, 2)
-        if layer_cons_in.ndim == 2:
-            layer_cons_in = jnp.broadcast_to(
-                layer_cons_in[None, :, :],
-                (in_dim, layer_cons_in.shape[0], 2)
-            )
+        if not self.has_network_constraints:
+            return state
 
-        # Handle broadcast format for constraints_y
-        # Broadcast: (out_dim, n_constraints) -> (out_dim, in_dim, n_constraints)
-        if layer_cons_y.ndim == 2:
-            n_constraints = layer_cons_y.shape[1]
-            layer_cons_y = jnp.broadcast_to(
-                layer_cons_y[:, None, :],
-                (out_dim, in_dim, n_constraints)
-            )
+        # Forward network constraint inputs through all but last layer
+        z_c = self.network_constraints_in  # (n_constraints, network_in_dim)
+        for layer in self.layers[:-1]:
+            z_c, state, *_ = layer(z_c, state, update=False)
 
-        # Validate shapes
-        assert layer_cons_in.shape == (in_dim, layer_cons_in.shape[1], 2), \
-            f"Layer {layer_idx}: constraints_in shape mismatch. Expected (in_dim={in_dim}, n_constraints, 2), got {layer_cons_in.shape}"
-        assert layer_cons_y.shape[0] == out_dim and layer_cons_y.shape[1] == in_dim, \
-            f"Layer {layer_idx}: constraints_y shape mismatch. Expected (out_dim={out_dim}, in_dim={in_dim}, n_constraints), got {layer_cons_y.shape}"
+        # z_c is now (n_constraints, last_layer_in_dim)
+        last_layer = self.layers[-1]
 
-        return layer_cons_in, layer_cons_y
-    
+        # Update constraints_in (the z_c values)
+        state = state.set(last_layer.constraints_in, z_c)
+
+        # Recompute C and P matrices with new z_c and current domain
+        a = state.get(last_layer.a)
+        b = state.get(last_layer.b)
+        C = build_combined_constraint_matrix(z_c, a, b, last_layer.k)
+        P = compute_constraint_projection_operator(C)
+
+        state = state.set(last_layer.constraints_C, C)
+        state = state.set(last_layer.constraints_P, P)
+
+        # Update constraints_a, constraints_b (domain protection bounds)
+        cons_a = jnp.min(z_c, axis=0)  # (in_dim,)
+        cons_b = jnp.max(z_c, axis=0)  # (in_dim,)
+        state = state.set(last_layer.constraints_a, cons_a)
+        state = state.set(last_layer.constraints_b, cons_b)
+
+        return state
+
     @eqx.filter_jit
     def adapt(self, state):
         # Adapt the model and return the new model and state
@@ -230,7 +281,20 @@ class AdaptKANJax(eqx.Module):
             conds.append(adapted)
 
         model = eqx.tree_at(lambda m: m.layers, self, replace=layers)
-        return model, state, jnp.any(jnp.stack(conds))
+        adapted_any = jnp.any(jnp.stack(conds))
+
+        # Recompute network constraints after ANY adaptation
+        # This is critical: when intermediate layers change domain,
+        # the z_c values for the last layer change!
+        if self.has_network_constraints:
+            state = jax.lax.cond(
+                adapted_any,
+                lambda s: model._recompute_network_constraints(s),
+                lambda s: s,
+                state
+            )
+
+        return model, state, adapted_any
 
     @eqx.filter_jit
     def manual_adapt(self, state):
@@ -243,7 +307,13 @@ class AdaptKANJax(eqx.Module):
             conds.append(adapted)
 
         model = eqx.tree_at(lambda m: m.layers, self, replace=layers)
-        return model, state, jnp.any(jnp.stack(conds))
+        adapted_any = jnp.any(jnp.stack(conds))
+
+        # Recompute network constraints after adaptation
+        if self.has_network_constraints:
+            state = model._recompute_network_constraints(state)
+
+        return model, state, adapted_any
 
     def get_activations(self, layer, x, state):
         # Like call layer but we don't sum the outputs

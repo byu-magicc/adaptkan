@@ -1,16 +1,15 @@
-"""Comprehensive unit tests for constraint initialization and forward pass."""
+"""Comprehensive unit tests for combined (sum-of-activations) constraint system."""
 import jax
 import jax.numpy as jnp
 import equinox as eqx
 import pytest
 
 from adaptkan.jax.layers import AdaptKANLayerJax
+from adaptkan.jax.model import AdaptKANJax
 from adaptkan.jax.utils import (
-    build_constraint_matrix,
+    build_combined_constraint_matrix,
     compute_chebyshev_basis,
-    compute_chebyshev_derivative_basis,
     compute_constraint_projection_operator,
-    project_weights,
 )
 
 
@@ -23,35 +22,12 @@ def key():
     return jax.random.PRNGKey(42)
 
 
-@pytest.fixture
-def simple_position_constraints():
-    """Position constraints only: f(0)=0, f(1)=1 for all activations."""
-    # (n_constraints, 2) - will be broadcast to all input dims
-    constraints_in = jnp.array([
-        [0.0, 0],  # position at x=0
-        [1.0, 0],  # position at x=1
-    ])
-    return constraints_in
-
-
-@pytest.fixture
-def position_and_derivative_constraints():
-    """Position + derivative constraints: f(0)=0, f(1)=1, f'(0)=0, f'(1)=0."""
-    constraints_in = jnp.array([
-        [0.0, 0],  # position at x=0
-        [1.0, 0],  # position at x=1
-        [0.0, 1],  # derivative at x=0
-        [1.0, 1],  # derivative at x=1
-    ])
-    return constraints_in
-
-
 # =============================================================================
-# Test: Basic constraint initialization
+# Test: Layer-level combined constraint initialization
 # =============================================================================
 
-class TestConstraintInitialization:
-    """Tests for constraint array initialization and broadcasting."""
+class TestLayerConstraintInitialization:
+    """Tests for layer-level combined constraint initialization."""
 
     def test_no_constraints_initialization(self, key):
         """Layer without constraints should have has_constraints=False."""
@@ -61,51 +37,61 @@ class TestConstraintInitialization:
             k=5,
             basis_type="chebyshev",
             constraints_in=None,
-            constraints_y=None,
+            constraints_out=None,
             key=key,
         )
 
         assert layer.has_constraints is False
         assert layer.constraints_in is None
-        assert layer.constraints_y is None
+        assert layer.constraints_out is None
         assert layer.constraints_C is None
         assert layer.constraints_P is None
         assert layer.constraints_a is None
         assert layer.constraints_b is None
 
-    def test_bspline_ignores_constraints(self, key, simple_position_constraints):
+    def test_bspline_ignores_constraints(self, key):
         """B-spline basis should ignore constraints."""
         out_dim, in_dim = 2, 3
-        n_constraints = simple_position_constraints.shape[0]
-        constraints_y = jnp.zeros((out_dim, n_constraints))
+        n_constraints = 2
+
+        constraints_in = jnp.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])
+        constraints_out = jnp.array([[0.0, 0.0], [1.0, 1.0]])
 
         layer = AdaptKANLayerJax(
             in_dim=in_dim,
             out_dim=out_dim,
             k=3,
             basis_type="bspline",
-            constraints_in=simple_position_constraints,
-            constraints_y=constraints_y,
+            constraints_in=constraints_in,
+            constraints_out=constraints_out,
             key=key,
         )
 
         assert layer.has_constraints is False
 
-    def test_constraints_with_broadcasting(self, key, simple_position_constraints):
-        """Test broadcasting of constraints_in and constraints_y."""
+    def test_combined_constraint_shapes(self, key):
+        """Test shapes of combined constraint arrays."""
         out_dim, in_dim, k = 3, 4, 5
-        n_constraints = simple_position_constraints.shape[0]
+        n_constraints = 2
 
-        # constraints_y: (out_dim, n_constraints) should broadcast to (out_dim, in_dim, n_constraints)
-        constraints_y = jnp.ones((out_dim, n_constraints))
+        # constraints_in: (n_constraints, in_dim)
+        # constraints_out: (n_constraints, out_dim)
+        constraints_in = jnp.array([
+            [0.0, 0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0, 1.0],
+        ])
+        constraints_out = jnp.array([
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+        ])
 
         layer, state = eqx.nn.make_with_state(AdaptKANLayerJax)(
             in_dim=in_dim,
             out_dim=out_dim,
             k=k,
             basis_type="chebyshev",
-            constraints_in=simple_position_constraints,
-            constraints_y=constraints_y,
+            constraints_in=constraints_in,
+            constraints_out=constraints_out,
             key=key,
         )
 
@@ -113,52 +99,28 @@ class TestConstraintInitialization:
 
         # Check shapes of stored constraint arrays
         constraints_in_stored = state.get(layer.constraints_in)
-        constraints_y_stored = state.get(layer.constraints_y)
+        constraints_out_stored = state.get(layer.constraints_out)
         constraints_C = state.get(layer.constraints_C)
         constraints_P = state.get(layer.constraints_P)
 
-        assert constraints_in_stored.shape == (in_dim, n_constraints, 2)
-        assert constraints_y_stored.shape == (out_dim, in_dim, n_constraints)
-        assert constraints_C.shape == (in_dim, n_constraints, k + 1)
-        assert constraints_P.shape == (in_dim, k + 1, n_constraints)
-
-    def test_full_shape_constraints_no_broadcasting(self, key):
-        """Test providing fully-shaped constraint arrays (no broadcasting needed)."""
-        out_dim, in_dim, k = 2, 3, 4
-        n_constraints = 2
-
-        # Fully specified shapes
-        constraints_in = jnp.zeros((in_dim, n_constraints, 2))
-        constraints_in = constraints_in.at[:, 0, :].set(jnp.array([0.0, 0]))  # position at x=0
-        constraints_in = constraints_in.at[:, 1, :].set(jnp.array([1.0, 0]))  # position at x=1
-
-        constraints_y = jnp.ones((out_dim, in_dim, n_constraints))
-
-        layer, state = eqx.nn.make_with_state(AdaptKANLayerJax)(
-            in_dim=in_dim,
-            out_dim=out_dim,
-            k=k,
-            basis_type="chebyshev",
-            constraints_in=constraints_in,
-            constraints_y=constraints_y,
-            key=key,
-        )
-
-        assert layer.has_constraints is True
-
-        constraints_in_stored = state.get(layer.constraints_in)
-        assert constraints_in_stored.shape == (in_dim, n_constraints, 2)
+        assert constraints_in_stored.shape == (n_constraints, in_dim)
+        assert constraints_out_stored.shape == (n_constraints, out_dim)
+        assert constraints_C.shape == (n_constraints, in_dim * (k + 1))
+        assert constraints_P.shape == (in_dim * (k + 1), n_constraints)
 
     def test_domain_expansion_for_constraints(self, key):
         """Constraints outside initialization_range should expand domain."""
-        out_dim, in_dim = 2, 1
+        out_dim, in_dim = 2, 2
 
-        # Constraint at x=2.0, outside default [-1, 1]
+        # Constraint at x=(2.0, 2.0), outside default [-1, 1]
         constraints_in = jnp.array([
-            [-1.0, 0],  # at edge of default domain
-            [2.0, 0],   # outside default domain
+            [-1.0, -1.0],  # at edge of default domain
+            [2.0, 2.0],    # outside default domain
         ])
-        constraints_y = jnp.zeros((out_dim, 2))
+        constraints_out = jnp.array([
+            [0.0, 0.0],
+            [1.0, 1.0],
+        ])
 
         layer, state = eqx.nn.make_with_state(AdaptKANLayerJax)(
             in_dim=in_dim,
@@ -167,67 +129,37 @@ class TestConstraintInitialization:
             basis_type="chebyshev",
             initialization_range=[-1.0, 1.0],
             constraints_in=constraints_in,
-            constraints_y=constraints_y,
+            constraints_out=constraints_out,
             key=key,
         )
 
-        # Domain should have expanded to include x=2.0
+        # Domain should have expanded to include constraint points
         a = state.get(layer.a)
         b = state.get(layer.b)
 
-        assert a[0] <= -1.0
-        assert b[0] >= 2.0
-
-    def test_derivative_constraints_dont_affect_domain(self, key):
-        """Derivative constraints (d>0) should not affect domain bounds."""
-        out_dim, in_dim = 2, 1
-
-        # Only derivative constraint at x=5.0
-        constraints_in = jnp.array([
-            [0.0, 0],   # position constraint at x=0
-            [5.0, 1],   # derivative constraint at x=5 (should not expand domain)
-        ])
-        constraints_y = jnp.zeros((out_dim, 2))
-
-        layer, state = eqx.nn.make_with_state(AdaptKANLayerJax)(
-            in_dim=in_dim,
-            out_dim=out_dim,
-            k=5,
-            basis_type="chebyshev",
-            initialization_range=[-1.0, 1.0],
-            constraints_in=constraints_in,
-            constraints_y=constraints_y,
-            key=key,
-        )
-
-        a = state.get(layer.a)
-        b = state.get(layer.b)
-
-        # Domain should not have expanded to x=5.0 (derivative constraint)
-        assert a[0] == -1.0
-        assert b[0] == 1.0
+        assert jnp.all(a <= -1.0)
+        assert jnp.all(b >= 2.0)
 
 
 # =============================================================================
-# Test: Weight projection
+# Test: Weight projection with combined constraints
 # =============================================================================
 
-class TestWeightProjection:
-    """Tests for get_projected_weights method."""
+class TestCombinedWeightProjection:
+    """Tests for get_projected_weights with combined constraints."""
 
-    def test_projection_satisfies_position_constraints(self, key):
-        """Projected weights should satisfy position constraints exactly."""
+    def test_projection_satisfies_layer_output_constraints(self, key):
+        """Projected weights should satisfy layer output constraints."""
         out_dim, in_dim, k = 2, 3, 5
 
+        # Constraints on layer output at specific input points
         constraints_in = jnp.array([
-            [0.0, 0],  # f(0) = target
-            [1.0, 0],  # f(1) = target
+            [0.0, 0.0, 0.0],  # input point 1
+            [1.0, 1.0, 1.0],  # input point 2
         ])
-
-        # Different target values for each output
-        constraints_y = jnp.array([
-            [0.0, 1.0],  # output 0: f(0)=0, f(1)=1
-            [1.0, 0.0],  # output 1: f(0)=1, f(1)=0
+        constraints_out = jnp.array([
+            [0.0, 1.0],  # output at input point 1: y[0]=0, y[1]=1
+            [1.0, 0.0],  # output at input point 2: y[0]=1, y[1]=0
         ])
 
         layer, state = eqx.nn.make_with_state(AdaptKANLayerJax)(
@@ -237,57 +169,23 @@ class TestWeightProjection:
             basis_type="chebyshev",
             initialization_range=[0.0, 1.0],
             constraints_in=constraints_in,
-            constraints_y=constraints_y,
+            constraints_out=constraints_out,
             key=key,
         )
 
         projected_weights = layer.get_projected_weights(state)
 
-        # Verify constraints are satisfied: C @ w = y
-        C = state.get(layer.constraints_C)
-        y = state.get(layer.constraints_y)
+        # Verify constraints are satisfied
+        C = state.get(layer.constraints_C)  # (n_constraints, in_dim * (k+1))
+        y = state.get(layer.constraints_out)  # (n_constraints, out_dim)
 
-        # C[j]: (n_constraints, k+1), projected_weights[i, j]: (k+1,)
-        Cw = jnp.einsum('jnk,ijk->ijn', C, projected_weights)
+        # Flatten weights: (out_dim, in_dim, k+1) -> (out_dim, in_dim * (k+1))
+        w_flat = projected_weights.reshape(out_dim, -1)
+
+        # C @ w_flat.T gives (n_constraints, out_dim)
+        Cw = C @ w_flat.T
 
         assert jnp.allclose(Cw, y, atol=1e-6)
-
-    def test_projection_satisfies_derivative_constraints(self, key):
-        """Projected weights should satisfy derivative constraints."""
-        out_dim, in_dim, k = 1, 1, 7  # Use higher degree for better conditioning
-
-        # Position and derivative constraints
-        constraints_in = jnp.array([
-            [0.0, 0],  # f(0) = 0
-            [1.0, 0],  # f(1) = 1
-            [0.0, 1],  # f'(0) = 0
-            [1.0, 1],  # f'(1) = 0
-        ])
-
-        constraints_y = jnp.array([
-            [0.0, 1.0, 0.0, 0.0],  # targets for f(0), f(1), f'(0), f'(1)
-        ])
-
-        layer, state = eqx.nn.make_with_state(AdaptKANLayerJax)(
-            in_dim=in_dim,
-            out_dim=out_dim,
-            k=k,
-            basis_type="chebyshev",
-            initialization_range=[0.0, 1.0],
-            constraints_in=constraints_in,
-            constraints_y=constraints_y,
-            key=key,
-        )
-
-        projected_weights = layer.get_projected_weights(state)
-
-        C = state.get(layer.constraints_C)
-        y = state.get(layer.constraints_y)
-
-        Cw = jnp.einsum('jnk,ijk->ijn', C, projected_weights)
-
-        # Use looser tolerance due to derivative constraint scaling
-        assert jnp.allclose(Cw, y, atol=1e-4)
 
     def test_no_constraints_returns_original_weights(self, key):
         """Without constraints, get_projected_weights should return original weights."""
@@ -309,10 +207,10 @@ class TestWeightProjection:
         out_dim, in_dim, k = 2, 2, 4
 
         constraints_in = jnp.array([
-            [0.0, 0],
-            [1.0, 0],
+            [0.0, 0.0],
+            [1.0, 1.0],
         ])
-        constraints_y = jnp.zeros((out_dim, 2))
+        constraints_out = jnp.zeros((2, out_dim))
 
         layer, state = eqx.nn.make_with_state(AdaptKANLayerJax)(
             in_dim=in_dim,
@@ -321,7 +219,7 @@ class TestWeightProjection:
             basis_type="chebyshev",
             initialization_range=[0.0, 1.0],
             constraints_in=constraints_in,
-            constraints_y=constraints_y,
+            constraints_out=constraints_out,
             key=key,
         )
 
@@ -331,39 +229,39 @@ class TestWeightProjection:
         # Manually apply projection formula again
         C = state.get(layer.constraints_C)
         P = state.get(layer.constraints_P)
-        y = state.get(layer.constraints_y)
+        y = state.get(layer.constraints_out)
 
-        Cw = jnp.einsum('jnk,ijk->ijn', C, projected1)
+        w_flat = projected1.reshape(out_dim, -1)
+        Cw = C @ w_flat.T
         violation = Cw - y
-        correction = jnp.einsum('jkn,ijn->ijk', P, violation)
-        projected2 = projected1 - correction
+        correction = P @ violation
+        projected2_flat = w_flat - correction.T
+        projected2 = projected2_flat.reshape(out_dim, in_dim, k + 1)
 
         # Should be the same (projection is idempotent)
-        # Use reasonable tolerance for single precision floats
         assert jnp.allclose(projected1, projected2, atol=1e-5)
 
 
 # =============================================================================
-# Test: Forward pass with constraints
+# Test: Forward pass with combined constraints
 # =============================================================================
 
-class TestForwardPassWithConstraints:
-    """Tests for basic_forward with constrained weights."""
+class TestForwardPassWithCombinedConstraints:
+    """Tests for forward pass with combined constrained weights."""
 
-    def test_forward_pass_satisfies_position_constraints(self, key):
+    def test_forward_pass_satisfies_layer_output_constraints(self, key):
         """Forward pass at constraint points should match constraint values."""
-        out_dim, in_dim, k = 2, 1, 5
+        out_dim, in_dim, k = 2, 2, 5
 
+        # Constraint: at input [0,0], output should be [0, 1]
+        #            at input [1,1], output should be [1, 0]
         constraints_in = jnp.array([
-            [0.0, 0],  # f(0)
-            [1.0, 0],  # f(1)
+            [0.0, 0.0],
+            [1.0, 1.0],
         ])
-
-        # Output 0: f(0)=0, f(1)=1
-        # Output 1: f(0)=1, f(1)=0
-        constraints_y = jnp.array([
-            [0.0, 1.0],
-            [1.0, 0.0],
+        constraints_out = jnp.array([
+            [0.0, 1.0],  # at [0,0]: y[0]=0, y[1]=1
+            [1.0, 0.0],  # at [1,1]: y[0]=1, y[1]=0
         ])
 
         layer, state = eqx.nn.make_with_state(AdaptKANLayerJax)(
@@ -373,36 +271,31 @@ class TestForwardPassWithConstraints:
             basis_type="chebyshev",
             initialization_range=[0.0, 1.0],
             constraints_in=constraints_in,
-            constraints_y=constraints_y,
-            activation_strategy='linear',  # Standard initialization
+            constraints_out=constraints_out,
+            activation_strategy='linear',
             key=key,
         )
 
         # Evaluate at constraint points
-        x_0 = jnp.array([[0.0]])  # batch_size=1, in_dim=1
-        x_1 = jnp.array([[1.0]])
+        x_0 = jnp.array([[0.0, 0.0]])
+        x_1 = jnp.array([[1.0, 1.0]])
 
-        y_0, state, *_ = layer(x_0, state)
-        y_1, state, *_ = layer(x_1, state)
+        y_0, state, *_ = layer(x_0, state, update=False)
+        y_1, state, *_ = layer(x_1, state, update=False)
 
-        # Output shape is (batch_size, out_dim) - summed over in_dim
-        # The constraint is per activation, so output y[i] = sum_j(phi_{ij}(x_j))
-        # With in_dim=1, output is just phi_{i0}(x_0)
         # Check outputs match constraint targets
-        assert jnp.allclose(y_0[0, 0], 0.0, atol=1e-5), f"Expected f(0)[0]=0, got {y_0[0, 0]}"
-        assert jnp.allclose(y_0[0, 1], 1.0, atol=1e-5), f"Expected f(0)[1]=1, got {y_0[0, 1]}"
-        assert jnp.allclose(y_1[0, 0], 1.0, atol=1e-5), f"Expected f(1)[0]=1, got {y_1[0, 0]}"
-        assert jnp.allclose(y_1[0, 1], 0.0, atol=1e-5), f"Expected f(1)[1]=0, got {y_1[0, 1]}"
+        assert jnp.allclose(y_0[0], constraints_out[0], atol=1e-5)
+        assert jnp.allclose(y_1[0], constraints_out[1], atol=1e-5)
 
     def test_forward_pass_batched(self, key):
         """Forward pass with multiple samples in a batch."""
         out_dim, in_dim, k = 2, 2, 4
 
         constraints_in = jnp.array([
-            [0.0, 0],
-            [1.0, 0],
+            [0.0, 0.0],
+            [1.0, 1.0],
         ])
-        constraints_y = jnp.zeros((out_dim, 2))  # All zeros
+        constraints_out = jnp.zeros((2, out_dim))  # All zeros
 
         layer, state = eqx.nn.make_with_state(AdaptKANLayerJax)(
             in_dim=in_dim,
@@ -411,8 +304,8 @@ class TestForwardPassWithConstraints:
             basis_type="chebyshev",
             initialization_range=[0.0, 1.0],
             constraints_in=constraints_in,
-            constraints_y=constraints_y,
-            activation_strategy='linear',  # Standard initialization
+            constraints_out=constraints_out,
+            activation_strategy='linear',
             key=key,
         )
 
@@ -423,38 +316,92 @@ class TestForwardPassWithConstraints:
             [0.5, 0.5],
         ])
 
-        y, state, *_ = layer(x, state)
+        y, state, *_ = layer(x, state, update=False)
 
-        # Output shape is (batch_size, out_dim) - activations summed over in_dim
-        # At constraint points, each activation output should be zero
-        # y[batch, out] = sum_j(phi_{out,j}(x_j))
-        # With constraints_y = 0 for all activations at x=0 and x=1:
+        # At constraint points, output should be zero
         assert jnp.allclose(y[0, :], 0.0, atol=1e-5)  # x = [0, 0]
         assert jnp.allclose(y[1, :], 0.0, atol=1e-5)  # x = [1, 1]
 
-    def test_forward_pass_without_constraints(self, key):
-        """Forward pass without constraints should work normally."""
-        layer, state = eqx.nn.make_with_state(AdaptKANLayerJax)(
-            in_dim=3,
-            out_dim=2,
+
+# =============================================================================
+# Test: Network-wide constraints
+# =============================================================================
+
+class TestNetworkConstraints:
+    """Tests for network-wide constraints applied to the last layer."""
+
+    def test_network_constraint_shapes(self, key):
+        """Test shapes when using network-wide constraints."""
+        width = [2, 4, 3]  # 2 inputs, hidden layer of 4, 3 outputs
+        n_constraints = 2
+
+        network_constraints_in = jnp.array([
+            [0.0, 0.0],
+            [1.0, 1.0],
+        ])
+        network_constraints_out = jnp.array([
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+        ])
+
+        model, state = eqx.nn.make_with_state(AdaptKANJax)(
+            width=width,
             k=5,
             basis_type="chebyshev",
-            key=key,
+            network_constraints_in=network_constraints_in,
+            network_constraints_out=network_constraints_out,
         )
 
-        x = jax.random.normal(key, (10, 3))
-        y, state, *_ = layer(x, state)
+        assert model.has_network_constraints is True
 
-        # Output shape is (batch_size, out_dim) - activations summed over in_dim
-        assert y.shape == (10, 2)
-        assert not jnp.any(jnp.isnan(y))
+        # Last layer should have constraints
+        last_layer = model.layers[-1]
+        assert last_layer.has_constraints is True
+
+        # Other layers should not have constraints
+        for layer in model.layers[:-1]:
+            assert layer.has_constraints is False
+
+    def test_network_constraints_satisfied_after_setup(self, key):
+        """Network constraints should be satisfied after _setup_network_constraints."""
+        width = [2, 4, 2]
+        n_constraints = 2
+
+        network_constraints_in = jnp.array([
+            [0.0, 0.0],
+            [1.0, 1.0],
+        ])
+        network_constraints_out = jnp.array([
+            [0.0, 0.0],
+            [1.0, 1.0],
+        ])
+
+        model, state = eqx.nn.make_with_state(AdaptKANJax)(
+            width=width,
+            k=5,
+            basis_type="chebyshev",
+            initialization_range=[0.0, 1.0],
+            network_constraints_in=network_constraints_in,
+            network_constraints_out=network_constraints_out,
+        )
+
+        # Setup network constraints (initializes last layer constraints with z_c)
+        state = model._setup_network_constraints(state)
+
+        # Evaluate network at constraint input points
+        y_0, state = model(network_constraints_in[0:1], state)
+        y_1, state = model(network_constraints_in[1:2], state)
+
+        # Outputs should match constraint targets
+        assert jnp.allclose(y_0[0], network_constraints_out[0], atol=1e-4)
+        assert jnp.allclose(y_1[0], network_constraints_out[1], atol=1e-4)
 
 
 # =============================================================================
 # Test: Gradient flow with constraints
 # =============================================================================
 
-class TestGradientFlowWithConstraints:
+class TestGradientFlowWithCombinedConstraints:
     """Tests to ensure gradients flow properly through constrained layers."""
 
     def test_gradients_flow_through_projection(self, key):
@@ -462,10 +409,10 @@ class TestGradientFlowWithConstraints:
         out_dim, in_dim, k = 2, 2, 4
 
         constraints_in = jnp.array([
-            [0.0, 0],
-            [1.0, 0],
+            [0.0, 0.0],
+            [1.0, 1.0],
         ])
-        constraints_y = jnp.zeros((out_dim, 2))
+        constraints_out = jnp.zeros((2, out_dim))
 
         layer, state = eqx.nn.make_with_state(AdaptKANLayerJax)(
             in_dim=in_dim,
@@ -474,7 +421,7 @@ class TestGradientFlowWithConstraints:
             basis_type="chebyshev",
             initialization_range=[0.0, 1.0],
             constraints_in=constraints_in,
-            constraints_y=constraints_y,
+            constraints_out=constraints_out,
             key=key,
         )
 
@@ -482,7 +429,7 @@ class TestGradientFlowWithConstraints:
 
         @eqx.filter_value_and_grad
         def loss_fn(layer, state, x):
-            y, state, *_ = layer(x, state)
+            y, state, *_ = layer(x, state, update=False)
             return jnp.sum(y ** 2)
 
         loss, grads = loss_fn(layer, state, x)
@@ -491,17 +438,17 @@ class TestGradientFlowWithConstraints:
         assert grads.weights is not None
         assert not jnp.all(grads.weights == 0)
 
-    def test_constraints_still_satisfied_after_gradient_step(self, key):
+    def test_constraints_satisfied_after_gradient_step(self, key):
         """After a gradient step, projected weights should still satisfy constraints."""
         import optax
 
         out_dim, in_dim, k = 2, 2, 4
 
         constraints_in = jnp.array([
-            [0.0, 0],
-            [1.0, 0],
+            [0.0, 0.0],
+            [1.0, 1.0],
         ])
-        constraints_y = jnp.zeros((out_dim, 2))
+        constraints_out = jnp.zeros((2, out_dim))
 
         layer, state = eqx.nn.make_with_state(AdaptKANLayerJax)(
             in_dim=in_dim,
@@ -510,7 +457,7 @@ class TestGradientFlowWithConstraints:
             basis_type="chebyshev",
             initialization_range=[0.0, 1.0],
             constraints_in=constraints_in,
-            constraints_y=constraints_y,
+            constraints_out=constraints_out,
             key=key,
         )
 
@@ -521,7 +468,7 @@ class TestGradientFlowWithConstraints:
 
         @eqx.filter_value_and_grad
         def loss_fn(layer, state, x):
-            y, state, *_ = layer(x, state)
+            y, state, *_ = layer(x, state, update=False)
             return jnp.sum(y ** 2)
 
         # Perform gradient step
@@ -532,238 +479,12 @@ class TestGradientFlowWithConstraints:
         # Check constraints are still satisfied
         projected_weights = layer.get_projected_weights(state)
         C = state.get(layer.constraints_C)
-        y = state.get(layer.constraints_y)
+        y = state.get(layer.constraints_out)
 
-        Cw = jnp.einsum('jnk,ijk->ijn', C, projected_weights)
+        w_flat = projected_weights.reshape(out_dim, -1)
+        Cw = C @ w_flat.T
 
         assert jnp.allclose(Cw, y, atol=1e-5)
-
-
-# =============================================================================
-# Test: Edge cases
-# =============================================================================
-
-class TestEdgeCases:
-    """Tests for edge cases and unusual configurations."""
-
-    def test_single_constraint(self, key):
-        """Layer with single constraint should work."""
-        out_dim, in_dim, k = 1, 1, 3
-
-        constraints_in = jnp.array([[0.5, 0]])  # Single constraint
-        constraints_y = jnp.array([[1.0]])
-
-        layer, state = eqx.nn.make_with_state(AdaptKANLayerJax)(
-            in_dim=in_dim,
-            out_dim=out_dim,
-            k=k,
-            basis_type="chebyshev",
-            initialization_range=[0.0, 1.0],
-            constraints_in=constraints_in,
-            constraints_y=constraints_y,
-            key=key,
-        )
-
-        assert layer.has_constraints is True
-
-        # Verify constraint is satisfied
-        C = state.get(layer.constraints_C)
-        y = state.get(layer.constraints_y)
-        projected = layer.get_projected_weights(state)
-
-        Cw = jnp.einsum('jnk,ijk->ijn', C, projected)
-        assert jnp.allclose(Cw, y, atol=1e-6)
-
-    def test_max_constraints_equal_to_degree(self, key):
-        """Number of constraints equal to degree+1 should work (fully determined)."""
-        out_dim, in_dim, k = 1, 1, 2  # k+1 = 3 coefficients
-
-        # 3 constraints = 3 coefficients (fully determined system)
-        constraints_in = jnp.array([
-            [0.0, 0],
-            [0.5, 0],
-            [1.0, 0],
-        ])
-        constraints_y = jnp.array([[0.0, 0.5, 1.0]])  # Linear function
-
-        layer, state = eqx.nn.make_with_state(AdaptKANLayerJax)(
-            in_dim=in_dim,
-            out_dim=out_dim,
-            k=k,
-            basis_type="chebyshev",
-            initialization_range=[0.0, 1.0],
-            constraints_in=constraints_in,
-            constraints_y=constraints_y,
-            key=key,
-        )
-
-        C = state.get(layer.constraints_C)
-        y = state.get(layer.constraints_y)
-        projected = layer.get_projected_weights(state)
-
-        Cw = jnp.einsum('jnk,ijk->ijn', C, projected)
-        assert jnp.allclose(Cw, y, atol=1e-5)
-
-    def test_high_derivative_order(self, key):
-        """Second derivative constraints should work."""
-        out_dim, in_dim, k = 1, 1, 5
-
-        constraints_in = jnp.array([
-            [0.0, 0],  # f(0) = 0
-            [1.0, 0],  # f(1) = 0
-            [0.5, 2],  # f''(0.5) = -2 (concave)
-        ])
-        constraints_y = jnp.array([[0.0, 0.0, -2.0]])
-
-        layer, state = eqx.nn.make_with_state(AdaptKANLayerJax)(
-            in_dim=in_dim,
-            out_dim=out_dim,
-            k=k,
-            basis_type="chebyshev",
-            initialization_range=[0.0, 1.0],
-            constraints_in=constraints_in,
-            constraints_y=constraints_y,
-            key=key,
-        )
-
-        C = state.get(layer.constraints_C)
-        y = state.get(layer.constraints_y)
-        projected = layer.get_projected_weights(state)
-
-        Cw = jnp.einsum('jnk,ijk->ijn', C, projected)
-        assert jnp.allclose(Cw, y, atol=1e-5)
-
-    def test_per_input_dim_constraints(self, key):
-        """Different constraints per input dimension."""
-        out_dim, in_dim, k = 1, 2, 4
-
-        # Different constraints for each input dimension
-        constraints_in = jnp.array([
-            [[0.0, 0], [1.0, 0]],  # Input dim 0: f(0), f(1)
-            [[0.0, 0], [0.5, 0]],  # Input dim 1: f(0), f(0.5) (different!)
-        ])  # Shape: (in_dim, n_constraints, 2)
-
-        constraints_y = jnp.array([
-            [[0.0, 1.0],   # Output 0, Input dim 0
-             [0.0, 0.5]],  # Output 0, Input dim 1
-        ])  # Shape: (out_dim, in_dim, n_constraints)
-
-        layer, state = eqx.nn.make_with_state(AdaptKANLayerJax)(
-            in_dim=in_dim,
-            out_dim=out_dim,
-            k=k,
-            basis_type="chebyshev",
-            initialization_range=[0.0, 1.0],
-            constraints_in=constraints_in,
-            constraints_y=constraints_y,
-            key=key,
-        )
-
-        C = state.get(layer.constraints_C)
-        y = state.get(layer.constraints_y)
-        projected = layer.get_projected_weights(state)
-
-        Cw = jnp.einsum('jnk,ijk->ijn', C, projected)
-        assert jnp.allclose(Cw, y, atol=1e-5)
-
-
-# =============================================================================
-# Test: Utility functions
-# =============================================================================
-
-class TestUtilityFunctions:
-    """Tests for constraint utility functions in utils.py."""
-
-    def test_build_constraint_matrix_position_only(self):
-        """Test constraint matrix with position constraints only."""
-        constraints = [
-            (0.0, 1.0, 0),  # f(0) = 1
-            (1.0, 2.0, 0),  # f(1) = 2
-        ]
-        a, b, degree = 0.0, 1.0, 3
-
-        C, y_vec = build_constraint_matrix(constraints, a, b, degree)
-
-        assert C.shape == (2, degree + 1)
-        assert y_vec.shape == (2,)
-        assert jnp.allclose(y_vec, jnp.array([1.0, 2.0]))
-
-    def test_build_constraint_matrix_with_derivatives(self):
-        """Test constraint matrix with derivative constraints."""
-        constraints = [
-            (0.0, 1.0, 0),  # f(0) = 1
-            (1.0, 2.0, 0),  # f(1) = 2
-            (0.5, 0.0, 1),  # f'(0.5) = 0
-        ]
-        a, b, degree = 0.0, 1.0, 4
-
-        C, y_vec = build_constraint_matrix(constraints, a, b, degree)
-
-        assert C.shape == (3, degree + 1)
-        assert y_vec.shape == (3,)
-
-    def test_projection_operator_properties(self):
-        """Test properties of the projection operator P."""
-        constraints = [
-            (0.0, 0.0, 0),
-            (1.0, 0.0, 0),
-        ]
-        a, b, degree = 0.0, 1.0, 3
-
-        C, _ = build_constraint_matrix(constraints, a, b, degree)
-        P = compute_constraint_projection_operator(C)
-
-        # P should have shape (k+1, n_constraints)
-        assert P.shape == (degree + 1, 2)
-
-        # P @ C should project onto constraint subspace
-        # (C @ P @ C^T) should equal identity on constraint space
-        # Equivalently: C @ P = I (n_constraints x n_constraints)
-        CP = C @ P
-        assert jnp.allclose(CP, jnp.eye(2), atol=1e-6)
-
-    def test_project_weights_1d(self):
-        """Test project_weights with 1D weight vector."""
-        constraints = [
-            (0.0, 1.0, 0),
-            (1.0, 2.0, 0),
-        ]
-        a, b, degree = 0.0, 1.0, 5
-
-        C, y_vec = build_constraint_matrix(constraints, a, b, degree)
-        P = compute_constraint_projection_operator(C)
-
-        # Random weights
-        key = jax.random.PRNGKey(0)
-        weights = jax.random.normal(key, (degree + 1,))
-
-        projected = project_weights(weights, C, P, y_vec)
-
-        # Check constraints are satisfied
-        assert jnp.allclose(C @ projected, y_vec, atol=1e-6)
-
-    def test_project_weights_batched(self):
-        """Test project_weights with batched weights."""
-        constraints = [
-            (0.0, 0.0, 0),
-            (1.0, 1.0, 0),
-        ]
-        a, b, degree = 0.0, 1.0, 4
-
-        C, y_vec = build_constraint_matrix(constraints, a, b, degree)
-        P = compute_constraint_projection_operator(C)
-
-        # Batched weights: (out_dim, in_dim, k+1)
-        key = jax.random.PRNGKey(0)
-        weights = jax.random.normal(key, (3, 2, degree + 1))
-
-        projected = project_weights(weights, C, P, y_vec)
-
-        # Check constraints satisfied for all activations
-        # Cw shape: (out_dim, in_dim, n_constraints)
-        Cw = jnp.einsum('nk,oik->oin', C, projected)
-
-        assert jnp.allclose(Cw, y_vec, atol=1e-6)
 
 
 # =============================================================================
@@ -773,16 +494,15 @@ class TestUtilityFunctions:
 class TestConstraintRecomputationDuringAdaptation:
     """Tests for constraint matrix recomputation when domain changes."""
 
-    def test_constraints_recomputed_after_adapt(self, key):
-        """Constraint matrices should be recomputed when domain changes."""
+    def test_layer_constraints_satisfied_after_adapt(self, key):
+        """Layer constraints should still be satisfied after adaptation."""
         out_dim, in_dim, k = 2, 2, 5
 
-        # Constraints at positions 0.0 and 1.0
         constraints_in = jnp.array([
-            [0.0, 0],  # f(0) = target
-            [1.0, 0],  # f(1) = target
+            [0.0, 0.0],
+            [1.0, 1.0],
         ])
-        constraints_y = jnp.zeros((out_dim, in_dim, 2))
+        constraints_out = jnp.zeros((2, out_dim))
 
         layer, state = eqx.nn.make_with_state(AdaptKANLayerJax)(
             in_dim=in_dim,
@@ -791,96 +511,47 @@ class TestConstraintRecomputationDuringAdaptation:
             basis_type="chebyshev",
             initialization_range=[0.0, 1.0],
             constraints_in=constraints_in,
-            constraints_y=constraints_y,
+            constraints_out=constraints_out,
             prune_patience=1,
             key=key,
         )
 
-        # Store original constraint matrices
-        C_original = state.get(layer.constraints_C).copy()
-
         # Simulate out-of-domain data to trigger stretch
-        # Layer __call__ with update=True automatically updates counts
         x_ood = jax.random.uniform(key, (100, in_dim), minval=-2.0, maxval=3.0)
         _, state, *_ = layer(x_ood, state, update=True)
 
-        # Run adaptation (should stretch domain and recompute C and P)
+        # Run adaptation
         layer, state, adapted = layer.adapt(state)
-
-        if adapted:
-            # Get new constraint matrices
-            C_new = state.get(layer.constraints_C)
-
-            # Domain should have changed
-            new_a = state.get(layer.a)
-            new_b = state.get(layer.b)
-
-            # At least one bound should have changed
-            domain_changed = jnp.any(new_a < 0.0) or jnp.any(new_b > 1.0)
-
-            if domain_changed:
-                # Verify constraints are still satisfied with new C
-                projected = layer.get_projected_weights(state)
-                Cw = jnp.einsum('jnk,ijk->ijn', C_new, projected)
-                y = state.get(layer.constraints_y)
-
-                assert jnp.allclose(Cw, y, atol=1e-5), "Constraints not satisfied after adaptation"
-
-    def test_constraints_satisfied_after_manual_adapt(self, key):
-        """Constraints should still be satisfied after manual_adapt."""
-        out_dim, in_dim, k = 2, 2, 5
-
-        constraints_in = jnp.array([
-            [0.0, 0],
-            [1.0, 0],
-        ])
-        constraints_y = jnp.zeros((out_dim, in_dim, 2))
-
-        layer, state = eqx.nn.make_with_state(AdaptKANLayerJax)(
-            in_dim=in_dim,
-            out_dim=out_dim,
-            k=k,
-            basis_type="chebyshev",
-            initialization_range=[0.0, 1.0],
-            constraints_in=constraints_in,
-            constraints_y=constraints_y,
-            key=key,
-        )
-
-        # Simulate OOD data
-        x_ood = jax.random.uniform(key, (100, in_dim), minval=-2.0, maxval=3.0)
-        _, state, *_ = layer(x_ood, state, update=True)
-
-        # Run manual_adapt
-        layer, state, adapted = layer.manual_adapt(state)
 
         # Verify constraints are still satisfied
         projected = layer.get_projected_weights(state)
         C = state.get(layer.constraints_C)
-        y = state.get(layer.constraints_y)
+        y = state.get(layer.constraints_out)
 
-        Cw = jnp.einsum('jnk,ijk->ijn', C, projected)
-        assert jnp.allclose(Cw, y, atol=1e-5), "Constraints not satisfied after manual_adapt"
+        w_flat = projected.reshape(out_dim, -1)
+        Cw = C @ w_flat.T
+
+        assert jnp.allclose(Cw, y, atol=1e-5)
 
     def test_domain_never_shrinks_past_constraints(self, key):
         """Domain should never shrink past constraint points."""
         out_dim, in_dim, k = 2, 2, 5
 
-        # Constraints at positions -0.5 and 1.5 (beyond initial domain)
+        # Constraints at positions outside initial domain
         constraints_in = jnp.array([
-            [-0.5, 0],
-            [1.5, 0],
+            [-0.5, -0.5],
+            [1.5, 1.5],
         ])
-        constraints_y = jnp.zeros((out_dim, in_dim, 2))
+        constraints_out = jnp.zeros((2, out_dim))
 
         layer, state = eqx.nn.make_with_state(AdaptKANLayerJax)(
             in_dim=in_dim,
             out_dim=out_dim,
             k=k,
             basis_type="chebyshev",
-            initialization_range=[0.0, 1.0],  # Will be expanded to [-0.5, 1.5]
+            initialization_range=[0.0, 1.0],
             constraints_in=constraints_in,
-            constraints_y=constraints_y,
+            constraints_out=constraints_out,
             prune_patience=1,
             key=key,
         )
@@ -888,10 +559,10 @@ class TestConstraintRecomputationDuringAdaptation:
         # Domain should already be expanded to include constraint points
         a = state.get(layer.a)
         b = state.get(layer.b)
-        assert jnp.all(a <= -0.5), f"Domain lower bound should be <= -0.5, got {a}"
-        assert jnp.all(b >= 1.5), f"Domain upper bound should be >= 1.5, got {b}"
+        assert jnp.all(a <= -0.5)
+        assert jnp.all(b >= 1.5)
 
-        # Train on data in narrow range [0.25, 0.75]
+        # Train on data in narrow range
         x_narrow = jax.random.uniform(key, (1000, in_dim), minval=0.25, maxval=0.75)
         for _ in range(5):
             _, state, *_ = layer(x_narrow, state, update=True)
@@ -900,16 +571,53 @@ class TestConstraintRecomputationDuringAdaptation:
         # After adaptation, domain should still include constraint points
         a_final = state.get(layer.a)
         b_final = state.get(layer.b)
-        assert jnp.all(a_final <= -0.5), f"Domain lower bound shrunk past constraint: {a_final}"
-        assert jnp.all(b_final >= 1.5), f"Domain upper bound shrunk past constraint: {b_final}"
+        assert jnp.all(a_final <= -0.5)
+        assert jnp.all(b_final >= 1.5)
 
-        # Verify constraints are still satisfied
-        projected = layer.get_projected_weights(state)
-        C = state.get(layer.constraints_C)
-        y = state.get(layer.constraints_y)
 
-        Cw = jnp.einsum('jnk,ijk->ijn', C, projected)
-        assert jnp.allclose(Cw, y, atol=1e-5), "Constraints not satisfied after shrinking"
+# =============================================================================
+# Test: Utility functions
+# =============================================================================
+
+class TestUtilityFunctions:
+    """Tests for constraint utility functions."""
+
+    def test_build_combined_constraint_matrix_shape(self):
+        """Test shape of combined constraint matrix."""
+        n_constraints = 3
+        in_dim = 4
+        k = 5
+
+        z_c = jnp.zeros((n_constraints, in_dim))
+        a = jnp.full((in_dim,), -1.0)
+        b = jnp.full((in_dim,), 1.0)
+
+        C = build_combined_constraint_matrix(z_c, a, b, k)
+
+        assert C.shape == (n_constraints, in_dim * (k + 1))
+
+    def test_projection_operator_properties(self):
+        """Test properties of the projection operator P."""
+        n_constraints = 2
+        in_dim = 2
+        k = 3
+
+        z_c = jnp.array([
+            [0.0, 0.0],
+            [1.0, 1.0],
+        ])
+        a = jnp.full((in_dim,), 0.0)
+        b = jnp.full((in_dim,), 1.0)
+
+        C = build_combined_constraint_matrix(z_c, a, b, k)
+        P = compute_constraint_projection_operator(C)
+
+        # P should have shape (in_dim * (k+1), n_constraints)
+        assert P.shape == (in_dim * (k + 1), n_constraints)
+
+        # C @ P should be identity on constraint space
+        CP = C @ P
+        assert jnp.allclose(CP, jnp.eye(n_constraints), atol=1e-6)
 
 
 if __name__ == "__main__":

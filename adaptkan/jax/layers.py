@@ -10,10 +10,8 @@ from adaptkan.jax.utils import (compute_marginal_log_likelihood,
                                 stretch_weights_and_counts_jax,
                                 refit_weights_and_counts_jax,
                                 coefs_from_curve_jax,
-                                build_constraint_matrix,
-                                compute_constraint_projection_operator,
-                                compute_chebyshev_derivative_basis,
-                                project_weights)
+                                build_combined_constraint_matrix,
+                                compute_constraint_projection_operator)
 from adaptkan.jax.constants import (M1, M2, M3, M4, M5)
 
 class AdaptKANLayerJax(eqx.Module):
@@ -57,13 +55,14 @@ class AdaptKANLayerJax(eqx.Module):
 
     # Constraint-related fields (for Chebyshev basis with hard constraints)
     # These are stored in state to exclude them from gradient updates
+    # Uses combined (sum-of-activations) approach: constraints on layer output y_i = Σ_j φ_{ij}(x_j)
     has_constraints: bool = eqx.field(static=True)
-    constraints_in: eqx.nn.StateIndex | None   # (in_dim, n_constraints, 2) - the (x, d) pairs
-    constraints_y: eqx.nn.StateIndex | None    # (out_dim, in_dim, n_constraints) - target values
-    constraints_C: eqx.nn.StateIndex | None    # (in_dim, n_constraints, k+1) - constraint matrices
-    constraints_P: eqx.nn.StateIndex | None    # (in_dim, k+1, n_constraints) - projection operators
-    constraints_a: eqx.nn.StateIndex | None    # (in_dim,) - min x per column (domain protection)
-    constraints_b: eqx.nn.StateIndex | None    # (in_dim,) - max x per column (domain protection)
+    constraints_in: eqx.nn.StateIndex | None   # (n_constraints, in_dim) - input points to layer
+    constraints_out: eqx.nn.StateIndex | None  # (n_constraints, out_dim) - target output values
+    constraints_C: eqx.nn.StateIndex | None    # (n_constraints, in_dim * (k+1)) - constraint matrix
+    constraints_P: eqx.nn.StateIndex | None    # (in_dim * (k+1), n_constraints) - projection operator
+    constraints_a: eqx.nn.StateIndex | None    # (in_dim,) - min x per input dim (domain protection)
+    constraints_b: eqx.nn.StateIndex | None    # (in_dim,) - max x per input dim (domain protection)
 
     def __init__(self,
                  in_dim=3,
@@ -85,8 +84,8 @@ class AdaptKANLayerJax(eqx.Module):
                  stretch_threshold=None, # Used alongside the "relative" stretch mode
                  exact_refit=False, # turn this on for slightly more accurate results in some scenarios. However exact_refit=False is faster for larger models
                  basis_type="bspline", # Adding in chebyshev basis functions
-                 constraints_in=None, # (in_dim, n_constraints, 2) or (n_constraints, 2) for broadcasting - the (x, d) pairs
-                 constraints_y=None, # (out_dim, in_dim, n_constraints) or (out_dim, n_constraints) for broadcasting - target values
+                 constraints_in=None, # (n_constraints, in_dim) - input points to layer
+                 constraints_out=None, # (n_constraints, out_dim) - target output values
                  key=None):
         
         if key is None:
@@ -119,89 +118,49 @@ class AdaptKANLayerJax(eqx.Module):
         b = jnp.full((in_dim,), float(initialization_range[1]), dtype=default_dtype)
 
         # Handle constraints if provided (only for Chebyshev basis)
-        if constraints_in is not None and constraints_y is not None and basis_type == "chebyshev":
+        # Uses combined (sum-of-activations) approach
+        if constraints_in is not None and constraints_out is not None and basis_type == "chebyshev":
             self.has_constraints = True
 
             # Convert to JAX arrays
+            # constraints_in: (n_constraints, in_dim) - input points to layer
+            # constraints_out: (n_constraints, out_dim) - target output values
             constraints_in_arr = jnp.asarray(constraints_in, dtype=default_dtype)
-            constraints_y_arr = jnp.asarray(constraints_y, dtype=default_dtype)
+            constraints_out_arr = jnp.asarray(constraints_out, dtype=default_dtype)
 
-            # Handle broadcasting: (n_constraints, 2) -> (in_dim, n_constraints, 2)
-            if constraints_in_arr.ndim == 2:
-                constraints_in_arr = jnp.broadcast_to(
-                    constraints_in_arr[None, :, :],
-                    (in_dim, constraints_in_arr.shape[0], 2)
-                )
+            n_constraints = constraints_in_arr.shape[0]
 
-            # Handle broadcasting: (out_dim, n_constraints) -> (out_dim, in_dim, n_constraints)
-            if constraints_y_arr.ndim == 2:
-                constraints_y_arr = jnp.broadcast_to(
-                    constraints_y_arr[:, None, :],
-                    (out_dim, in_dim, constraints_y_arr.shape[1])
-                )
+            # Validate shapes
+            assert constraints_in_arr.shape == (n_constraints, in_dim), \
+                f"constraints_in must have shape (n_constraints, in_dim), got {constraints_in_arr.shape}"
+            assert constraints_out_arr.shape == (n_constraints, out_dim), \
+                f"constraints_out must have shape (n_constraints, out_dim), got {constraints_out_arr.shape}"
 
-            n_constraints = constraints_in_arr.shape[1]
-
-            # Compute constraints_a and constraints_b (min/max x per column for domain protection)
-            # Only consider position constraints (d=0) for domain bounds
-            x_vals = constraints_in_arr[:, :, 0]  # (in_dim, n_constraints)
-            d_vals = constraints_in_arr[:, :, 1]  # (in_dim, n_constraints)
-
-            # Mask for position constraints (d=0)
-            pos_mask = (d_vals == 0)
-
-            # Compute min/max x for position constraints per input dimension
-            # Use large values for masked entries
-            x_for_min = jnp.where(pos_mask, x_vals, jnp.inf)
-            x_for_max = jnp.where(pos_mask, x_vals, -jnp.inf)
-            cons_a = jnp.min(x_for_min, axis=1)  # (in_dim,)
-            cons_b = jnp.max(x_for_max, axis=1)  # (in_dim,)
+            # Compute constraints_a and constraints_b (min/max x per input dim for domain protection)
+            cons_a = jnp.min(constraints_in_arr, axis=0)  # (in_dim,)
+            cons_b = jnp.max(constraints_in_arr, axis=0)  # (in_dim,)
 
             # Expand domain to include constraint points
             a = jnp.minimum(a, cons_a)
             b = jnp.maximum(b, cons_b)
 
-            # Build constraint matrices C and projection operators P for each input dimension
-            # C: (in_dim, n_constraints, k+1)
-            # P: (in_dim, k+1, n_constraints)
-            def build_C_and_P_for_column(j):
-                """Build C and P for input dimension j."""
-                col_constraints = constraints_in_arr[j]  # (n_constraints, 2)
-                col_a = a[j]
-                col_b = b[j]
-
-                # Build list of (x, y_placeholder, d) tuples for build_constraint_matrix
-                # y values don't matter for C, only x and d
-                constraint_list = [(float(col_constraints[i, 0]), 0.0, int(col_constraints[i, 1]))
-                                   for i in range(n_constraints)]
-
-                C, _ = build_constraint_matrix(constraint_list, float(col_a), float(col_b), k)
-                P = compute_constraint_projection_operator(C)
-
-                return C, P
-
-            # Build C and P for all input dimensions
-            C_list = []
-            P_list = []
-            for j in range(in_dim):
-                C_j, P_j = build_C_and_P_for_column(j)
-                C_list.append(C_j)
-                P_list.append(P_j)
-
-            constraints_C_arr = jnp.stack(C_list, axis=0)  # (in_dim, n_constraints, k+1)
-            constraints_P_arr = jnp.stack(P_list, axis=0)  # (in_dim, k+1, n_constraints)
+            # Build combined constraint matrix C and projection operator P
+            # C: (n_constraints, in_dim * (k+1))
+            # P: (in_dim * (k+1), n_constraints)
+            C = build_combined_constraint_matrix(constraints_in_arr, a, b, k)
+            P = compute_constraint_projection_operator(C)
 
             # Store in StateIndex
             self.constraints_in = eqx.nn.StateIndex(constraints_in_arr)
-            self.constraints_y = eqx.nn.StateIndex(constraints_y_arr)
-            self.constraints_C = eqx.nn.StateIndex(constraints_C_arr)
-            self.constraints_P = eqx.nn.StateIndex(constraints_P_arr)
+            self.constraints_out = eqx.nn.StateIndex(constraints_out_arr)
+            self.constraints_C = eqx.nn.StateIndex(C)
+            self.constraints_P = eqx.nn.StateIndex(P)
             self.constraints_a = eqx.nn.StateIndex(cons_a)
             self.constraints_b = eqx.nn.StateIndex(cons_b)
         else:
             self.has_constraints = False
             self.constraints_in = None
-            self.constraints_y = None
+            self.constraints_out = None
             self.constraints_C = None
             self.constraints_P = None
             self.constraints_a = None
@@ -465,10 +424,11 @@ class AdaptKANLayerJax(eqx.Module):
         """
         Recompute constraint matrices C and P when domain bounds change.
 
+        Uses combined (sum-of-activations) approach where C has shape
+        (n_constraints, in_dim * (k+1)).
+
         The constraint matrices depend on the domain [a, b] because Chebyshev
         basis functions are evaluated after mapping x to the reference domain [-1, 1].
-
-        This version is JIT-compatible using vmap instead of Python loops.
 
         Args:
             state: Current state
@@ -481,61 +441,32 @@ class AdaptKANLayerJax(eqx.Module):
         if not self.has_constraints:
             return state
 
-        constraints_in = state.get(self.constraints_in)  # (in_dim, n_constraints, 2)
+        z_c = state.get(self.constraints_in)  # (n_constraints, in_dim)
 
-        # JIT-compatible version using vmap
-        def build_C_P_for_dim(col_constraints, col_a, col_b):
-            """Build C and P matrices for a single input dimension."""
-            # col_constraints: (n_constraints, 2) - each row is (x, d)
-            x_vals = col_constraints[:, 0]  # (n_constraints,)
-            d_vals = col_constraints[:, 1].astype(jnp.int32)  # (n_constraints,)
+        # Build combined constraint matrix and projection operator
+        C = build_combined_constraint_matrix(z_c, new_a, new_b, self.k)
+        P = compute_constraint_projection_operator(C)
 
-            # Build C matrix row by row using vmap
-            def build_row(x_val, d_val):
-                """Build one row of C matrix for constraint at x with derivative order d."""
-                x_arr = jnp.array([[x_val]])  # (1, 1)
-
-                # Use lax.switch to handle different derivative orders (0, 1, 2, ...)
-                # For simplicity, support up to derivative order 2
-                def deriv_0(_):
-                    return compute_chebyshev_derivative_basis(x_arr, col_a, col_b, self.k, derivative_order=0)[0, 0, :]
-
-                def deriv_1(_):
-                    return compute_chebyshev_derivative_basis(x_arr, col_a, col_b, self.k, derivative_order=1)[0, 0, :]
-
-                def deriv_2(_):
-                    return compute_chebyshev_derivative_basis(x_arr, col_a, col_b, self.k, derivative_order=2)[0, 0, :]
-
-                # Default to deriv_0 for any other value
-                row = jax.lax.switch(d_val, [deriv_0, deriv_1, deriv_2], None)
-                return row
-
-            C_j = jax.vmap(build_row)(x_vals, d_vals)  # (n_constraints, k+1)
-            P_j = compute_constraint_projection_operator(C_j)  # (k+1, n_constraints)
-            return C_j, P_j
-
-        # vmap over input dimensions
-        constraints_C_arr, constraints_P_arr = jax.vmap(build_C_P_for_dim)(
-            constraints_in, new_a, new_b
-        )  # (in_dim, n_constraints, k+1), (in_dim, k+1, n_constraints)
-
-        state = state.set(self.constraints_C, constraints_C_arr)
-        state = state.set(self.constraints_P, constraints_P_arr)
+        state = state.set(self.constraints_C, C)
+        state = state.set(self.constraints_P, P)
 
         return state
 
     def get_projected_weights(self, state):
         """
-        Project weights to satisfy hard constraints.
+        Project weights to satisfy hard constraints using combined (sum-of-activations) approach.
 
-        For each activation φ_{ij} (output i, input j):
-            ŵ_{ij} = w_{ij} - P_j @ (C_j @ w_{ij} - y_{ij})
+        For each output i, the layer output at constraint point x is:
+            y_i(x) = Σ_j w_{i,j}^T @ T_j(x_j) = w_{i,*}^T @ C_row
+
+        The projection formula is:
+            ŵ_{i,*} = w_{i,*} - P @ (C @ w_{i,*} - y_i)
 
         where:
-            - C_j: (n_constraints, k+1) constraint matrix for input dimension j
-            - P_j: (k+1, n_constraints) projection operator for input dimension j
-            - y_{ij}: (n_constraints,) target values for activation (i, j)
-            - w_{ij}: (k+1,) weights for activation (i, j)
+            - C: (n_constraints, in_dim * (k+1)) constraint matrix
+            - P: (in_dim * (k+1), n_constraints) projection operator = C^T @ (C @ C^T)^{-1}
+            - w_{i,*}: (in_dim * (k+1),) flattened weight vector for output i
+            - y_i: (n_constraints,) target values for output i at constraint points
 
         Returns:
             projected_weights: (out_dim, in_dim, k+1) projected weight tensor
@@ -543,31 +474,31 @@ class AdaptKANLayerJax(eqx.Module):
         if not self.has_constraints:
             return self.weights
 
-        C = state.get(self.constraints_C)  # (in_dim, n_constraints, k+1)
-        P = state.get(self.constraints_P)  # (in_dim, k+1, n_constraints)
-        y = state.get(self.constraints_y)  # (out_dim, in_dim, n_constraints)
+        C = state.get(self.constraints_C)      # (n_constraints, in_dim * (k+1))
+        P = state.get(self.constraints_P)      # (in_dim * (k+1), n_constraints)
+        y = state.get(self.constraints_out)    # (n_constraints, out_dim)
 
-        # weights shape: (out_dim, in_dim, k+1)
-        # For each (i, j) pair, apply: ŵ = w - P_j @ (C_j @ w - y_{ij})
+        out_dim, in_dim, k_plus_1 = self.weights.shape
 
-        # Step 1: Compute C @ w for all activations
-        # C[j]: (n_constraints, k+1), w[i, j]: (k+1,)
-        # Result: (out_dim, in_dim, n_constraints)
-        Cw = jnp.einsum('jnk,ijk->ijn', C, self.weights)
+        # Flatten weights: (out_dim, in_dim, k+1) -> (out_dim, in_dim * (k+1))
+        w_flat = self.weights.reshape(out_dim, -1)
 
-        # Step 2: Compute violation: C @ w - y
-        # violation shape: (out_dim, in_dim, n_constraints)
+        # For each output i: ŵ_i = w_i - P @ (C @ w_i - y[:, i])
+        # C @ w_flat.T -> (n_constraints, out_dim)
+        Cw = C @ w_flat.T  # (n_constraints, out_dim)
+
+        # Compute violation: C @ w - y
+        # y is (n_constraints, out_dim), so violation is (n_constraints, out_dim)
         violation = Cw - y
 
-        # Step 3: Compute correction: P @ violation
-        # P[j]: (k+1, n_constraints), violation[i, j]: (n_constraints,)
-        # Result: (out_dim, in_dim, k+1)
-        correction = jnp.einsum('jkn,ijn->ijk', P, violation)
+        # P @ violation -> (in_dim * (k+1), out_dim)
+        correction = P @ violation  # (in_dim * (k+1), out_dim)
 
-        # Step 4: Apply projection
-        projected_weights = self.weights - correction
+        # Apply correction: w_flat is (out_dim, in_dim * (k+1)), correction.T is (out_dim, in_dim * (k+1))
+        w_projected_flat = w_flat - correction.T
 
-        return projected_weights
+        # Reshape back to (out_dim, in_dim, k+1)
+        return w_projected_flat.reshape(out_dim, in_dim, k_plus_1)
 
     def basic_forward(self, x, state):
         # Use projected weights if constraints are enabled
