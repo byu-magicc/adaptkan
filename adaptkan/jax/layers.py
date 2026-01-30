@@ -162,7 +162,12 @@ class AdaptKANLayerJax(eqx.Module):
     def get_shrink_threshold(self, state):
         # Get the prune (shrink) threshold
         if self.prune_mode == "default": # <-- default mode
-            thresh = (1 - self.ema_alpha)**self.prune_patience * self.ema_alpha
+            if self.ema_alpha >= 1.0:
+                # When ema_alpha = 1.0, counts are fully replaced each step
+                # Use ema_alpha directly to avoid zero threshold
+                thresh = self.ema_alpha
+            else:
+                thresh = (1 - self.ema_alpha)**self.prune_patience * self.ema_alpha
         elif self.prune_mode == "relative":
             thresh = state.get(self.data_counts).max() * self.ema_alpha
         return thresh

@@ -80,6 +80,10 @@ model, state = eqx.nn.make_with_state(AdaptKANJax)(width=[2, 5, 1])
 └── LICENSE                 # GPL-3.0 License
 ```
 
+## Known Issues / Bug Fixes
+
+- **`ema_alpha = 1.0` causing zero shrink threshold** (2026-01-30): When `ema_alpha` was set to `1.0`, the shrink threshold formula `(1 - ema_alpha)^prune_patience * ema_alpha` evaluated to zero, which caused the shrink domain mechanism to not work. This has been fixed to use `ema_alpha` directly when `ema_alpha >= 1.0`.
+
 ## Contributing
 
 Contributions are welcome! Please:
